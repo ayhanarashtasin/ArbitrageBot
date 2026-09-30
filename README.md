@@ -110,6 +110,17 @@ Saved-pick windows overlap between sweeps; their estimates are repeated observat
   verification and before every slice, so an "equal quantity" hedge is always one asset against itself.
 - **Zero Delta cross-check.** Zero Delta shows the last settled funding rate while venues publish a running estimate
   for the next settlement; a rate agrees when it matches either one. A wrong symbol, interval or sign matches neither.
+- **Open-trade profit is never a false number.** If a leg's venue misses a cycle, the trade is valued with that leg's
+  last price (up to 5 minutes old, labelled with its age); after that the dashboard shows "price unavailable" instead
+  of a total that would leave the leg's whole position out.
+- **A locked database cannot stop a sweep.** File SQLite runs in WAL mode (another program reading the file never
+  blocks the bot), waits up to 30 s for another writer, and every scanner write is buffered during an outage. Use
+  PostgreSQL (docker-compose) for a long-running deployment.
+- **Health means healthy.** The engine is green only when its loop completed and no trade is DEGRADED, RECONCILING,
+  in ERROR or waiting for a human; health details and alerts show the first line of the error.
+- **Stale data.** A book older than `MAX_MARKET_DATA_AGE_MS` is fetched once more before it counts as stale (MEXC
+  sometimes serves a cached snapshot); data that stays old still pauses trading, with one alert per episode. Keep the
+  PC clock synchronised: a clock that runs ahead makes every venue's data look older than it is.
 - **Crypto is never held to the earnings calendar.** A venue's own contract label (Binance, Gate, Bitget) decides the
   asset class; venues that list crypto next to stocks (Ondo Perps, Lighter on Robinhood) only decide for unlabelled coins.
 - In paper mode, blank `REQUIRED_BEFORE_LIVE` values use **labelled paper defaults** (`app/core/trading_config.py`).
