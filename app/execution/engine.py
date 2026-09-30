@@ -88,6 +88,7 @@ class ActiveTrade:
     unresolved: dict[str, str] = field(default_factory=dict)  # client order id -> leg
     synced: set[str] = field(default_factory=set)
     pending_funding: dict[str, tuple[datetime, Decimal]] = field(default_factory=dict)
+    last_settled: dict[str, datetime] = field(default_factory=dict)  # leg -> last settlement time paid
     max_delta_usd: Decimal = D(0)
     last_action: RiskAction | None = None
     last_obs: Observation | None = None
@@ -265,13 +266,22 @@ class TradeEngine:
 
     # ==== funding (paper) ========================================================================
     async def _accrue_funding(self, active: ActiveTrade, obs: Observation) -> None:
-        """Settle paper funding at each venue's real settlement time, using the rate that applied."""
+        """Settle paper funding at each venue's real settlement time, using the rate that applied.
+
+        Each settlement is paid at most once per leg. The observation is read BEFORE this runs, so right after a
+        settlement a venue can still report the settlement just paid as its "next" one (live 2026-09-30: Hyperliquid's
+        13:00 funding was credited twice on AERO). A settlement at or before the last one paid is therefore ignored.
+        """
         now = self.clock.now()
         for leg in active.legs:
             info = obs.funding[leg.role]
             if info is None or info.next_funding_time is None:
                 continue
+            last_paid = active.last_settled.get(leg.role)
             pending = active.pending_funding.get(leg.role)
+            if pending is not None and last_paid is not None and pending[0] <= last_paid:
+                active.pending_funding.pop(leg.role, None)  # already paid: never pay the same settlement twice
+                pending = None
             if pending is not None and now >= pending[0] and isinstance(leg.venue, PaperVenue):
                 settle_time, rate = pending
                 pos = await leg.venue.get_position(leg.meta.symbol)
@@ -287,9 +297,12 @@ class TradeEngine:
                     await self.notifier.alert(
                         "funding_payment", f"{leg.role} {leg.venue.name}: {payment.payment:+.6f} USD at rate {rate}",
                         trade_id=active.id)
+                active.last_settled[leg.role] = settle_time
                 active.pending_funding.pop(leg.role, None)
                 pending = None
-            if pending is None or info.next_funding_time == pending[0]:
+            last_paid = active.last_settled.get(leg.role)
+            if (pending is None or info.next_funding_time == pending[0]) and \
+                    (last_paid is None or info.next_funding_time > last_paid):
                 active.pending_funding[leg.role] = (info.next_funding_time, info.funding_rate)
 
     # ==== persistence helpers ====================================================================
@@ -855,8 +868,13 @@ class TradeEngine:
                 active.ledger.append(OrderRecord(o.leg, o.side, o.filled_quantity, o.average_fill_price, o.fee_usd,
                                                  refs.get(o.client_order_id)))
         roles = {leg.venue.name: leg.role for leg in active.legs}
+        payments = self.repo.funding_payments(active.id)
         active.funding_ledger = [FundingRecord(roles.get(f.venue, "long"), f.expected_payment, f.actual_payment)
-                                 for f in self.repo.funding_payments(active.id)]
+                                 for f in payments]
+        for f in payments:  # a restart must not pay a settlement that was already paid before it
+            role, at = roles.get(f.venue), as_utc(f.timestamp)
+            if role and (role not in active.last_settled or at > active.last_settled[role]):
+                active.last_settled[role] = at
 
     def _set_manual(self, trade_id: str, reason: str) -> None:
         try:

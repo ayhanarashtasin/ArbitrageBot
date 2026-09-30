@@ -508,3 +508,32 @@ def test_recovery_rejects_records_that_never_reached_a_venue():
 def test_recovery_of_a_closed_history_does_nothing():
     w = World()
     assert run(w.engine.recover()) == []
+
+
+def test_a_settlement_is_paid_once_even_if_the_venue_still_reports_it_as_next():
+    """Live 2026-09-30: an observation read just before 13:00 still said "next funding 13:00" after 13:00 was paid,
+    and Hyperliquid's 13:00 funding was credited twice. A settlement at or before the last one paid is ignored,
+    also after a restart."""
+    from app.execution.engine import Observation
+    from tests.unit.helpers import funding
+    w = World()
+    enter_fully(w)
+    a = w.engine.active["arb0001"]
+    boundary = (w.clock.now() + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    stale = {role: funding("0.0003", now=w.clock.now()).model_copy(update={"next_funding_time": boundary})
+             for role in ("long", "short")}
+    obs = Observation(funding=stale)
+    a.pending_funding.clear()
+    run(w.engine._accrue_funding(a, obs))  # arms the pending settlement
+    w.clock.advance(seconds=(boundary - w.clock.now()).total_seconds() + 2)
+    for _ in range(3):  # the same stale "next = boundary" reading, cycle after cycle
+        run(w.engine._accrue_funding(a, obs))
+        w.clock.advance(seconds=5)
+    paid = [f for f in w.repo.funding_payments(a.id) if f.timestamp.replace(tzinfo=boundary.tzinfo) == boundary]
+    assert len(paid) == 2  # one per leg, not one per cycle
+    restored = w.new_engine()
+    run(restored.recover())
+    b = restored.active[a.id]
+    b.pending_funding = {role: (boundary, D("0.0003")) for role in ("long", "short")}
+    run(restored._accrue_funding(b, obs))
+    assert len([f for f in w.repo.funding_payments(a.id) if f.timestamp.replace(tzinfo=boundary.tzinfo) == boundary]) == 2
