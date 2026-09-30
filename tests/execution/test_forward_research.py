@@ -340,3 +340,66 @@ def test_a_venue_outage_never_shows_the_whole_leg_as_a_loss():
     w.clock.advance(seconds=15)
     w.step()
     assert _pnl_numbers(rt, trade)["status"] == "live"
+
+
+def test_engine_health_is_red_after_a_failed_loop_or_while_a_trade_is_degraded():
+    """Senior review 2026-09-30: the engine was marked green right after a failed iteration and never showed a
+    DEGRADED trade. A green engine must mean the loop ran AND every active trade is healthy."""
+    from types import SimpleNamespace
+    from app.core.health import Health
+    from app.workers.runner import Runner
+    w = World()
+    enter_fully(w)
+    a = w.engine.active["arb0001"]
+    health = Health(w.clock)
+    calls = {"n": 0}
+
+    seen_before_second_pass = {}
+
+    async def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        if calls["n"] == 2:
+            seen_before_second_pass.update(health.snapshot()["watch"])
+
+    scanner = SimpleNamespace(watch=[], recheck_watch=flaky)
+    runner = Runner(settings=None, params=w.params, repo=w.repo, engine=w.engine, scanner=scanner,
+                    notifier=w.notifier, health=health, clock=w.clock)
+
+    async def broken():
+        raise RuntimeError("engine iteration failed")
+
+    assert run(runner._guard("engine", broken())) is False
+    assert health.snapshot()["engine"]["ok"] is False  # and nothing marks it green again in the same pass
+    runner.mark_engine_health()
+    assert health.snapshot()["engine"]["ok"] is True
+    a.executor.long.venue.connected = False
+    w.clock.advance(seconds=15)
+    w.step()
+    assert w.engine.state_of(a).value == "DEGRADED"
+    runner.mark_engine_health()
+    snap = health.snapshot()["engine"]
+    assert snap["ok"] is False and "arb0001 DEGRADED" in snap["detail"]
+    a.executor.long.venue.connected = True
+    for _ in range(3):
+        w.clock.advance(seconds=15)
+        w.step()
+    runner.mark_engine_health()
+    assert health.snapshot()["engine"]["ok"] is True
+
+    # the real watch loop: its first re-check fails, the second succeeds, and health must end green
+    runner.params = w.params.model_copy(update={"watch_interval_seconds": 0})
+
+    async def two_passes():
+        import asyncio
+        task = asyncio.create_task(runner.watch_loop())
+        while calls["n"] < 2:
+            await asyncio.sleep(0.005)
+        await asyncio.sleep(0.02)
+        runner.stop()
+        await task
+
+    run(two_passes())
+    assert seen_before_second_pass["ok"] is False and seen_before_second_pass["detail"] == "RuntimeError: boom"
+    assert calls["n"] >= 2 and health.snapshot()["watch"]["ok"] is True  # green again after the good pass

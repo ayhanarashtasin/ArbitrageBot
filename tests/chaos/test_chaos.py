@@ -263,4 +263,4 @@ def test_engine_loop_survives_a_failing_iteration():
         return runner.health.snapshot()["engine"]
 
     snap = run(go())
-    assert snap["ok"] is False and snap["detail"] == "RuntimeError"
+    assert snap["ok"] is False and snap["detail"] == "RuntimeError: boom"  # the cause is visible, not just its type

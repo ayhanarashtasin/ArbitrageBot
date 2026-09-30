@@ -13,6 +13,7 @@ import time
 from app.core.clock import Clock
 from app.core.health import Health
 from app.core.trading_config import ResolvedParams, TradingSettings
+from app.domain.trade import TradeState
 from app.execution.engine import TradeEngine
 from app.notifications.notifier import Notifier
 from app.persistence.repository import Repository
@@ -20,6 +21,19 @@ from app.workers.scanner import Scanner
 
 log = logging.getLogger(__name__)
 ERROR_ALERT_EVERY_SECONDS = 300
+# Trade states that mean "not healthy right now": the engine health turns red and names the trade.
+UNHEALTHY_TRADE_STATES = frozenset({TradeState.DEGRADED, TradeState.RECONCILING, TradeState.ERROR,
+                                    TradeState.MANUAL_INTERVENTION_REQUIRED})
+
+
+def _brief(exc: BaseException) -> str:
+    """Type and first line of an error, for health and alerts (the senior could not see what "OperationalError" was).
+
+    SQLAlchemy appends the whole statement and its parameters after " [SQL:"; that part is dropped.
+    """
+    text = str(exc).splitlines()[0] if str(exc) else ""
+    text = text.split(" [SQL:")[0].strip()
+    return (f"{type(exc).__name__}: {text}" if text else type(exc).__name__)[:160]
 
 
 class Runner:
@@ -45,22 +59,40 @@ class Runner:
         self.health.mark("engine", not manual, "manual intervention needed" if manual else "recovered")
         return manual
 
-    async def _guard(self, name: str, coro) -> None:
+    async def _guard(self, name: str, coro) -> bool:
+        """Run one iteration. True when it completed; False (health red, alert rate limited) when it raised."""
         try:
             await coro
+            return True
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - the loop must survive
             log.exception("%s iteration failed", name)
-            self.health.mark(name, False, type(exc).__name__)
+            self.health.mark(name, False, _brief(exc))
             if time.monotonic() - self._last_error_alert > ERROR_ALERT_EVERY_SECONDS:
                 self._last_error_alert = time.monotonic()
-                await self.notifier.alert("critical_error", f"{name} failed: {type(exc).__name__}", severity="critical")
+                await self.notifier.alert("critical_error", f"{name} failed: {_brief(exc)}", severity="critical")
+            return False
+
+    def mark_engine_health(self) -> None:
+        """Green only when the loop completed AND every active trade is in a normal state.
+
+        Senior review 2026-09-30: the engine was marked green straight after a failed iteration, and trades that were
+        DEGRADED or in ERROR never showed. A green engine must mean every active trade is healthy.
+        """
+        active = self.engine.active.values()
+        troubled = [f"{t.id} {self.engine.state_of(t).value}" for t in active
+                    if self.engine.state_of(t) in UNHEALTHY_TRADE_STATES]
+        detail = f"{len(self.engine.active)} active trades"
+        if troubled:
+            self.health.mark("engine", False, detail + "; not healthy: " + ", ".join(troubled))
+        else:
+            self.health.mark("engine", True, detail)
 
     async def engine_loop(self) -> None:
         while not self._stop.is_set():
-            await self._guard("engine", self.engine.run_once())
-            self.health.mark("engine", True, f"{len(self.engine.active)} active trades")
+            if await self._guard("engine", self.engine.run_once()):
+                self.mark_engine_health()
             await self._sleep(self.engine.recommended_delay())
 
     async def scan_loop(self) -> None:
@@ -72,7 +104,9 @@ class Runner:
 
     async def watch_loop(self) -> None:
         while not self._stop.is_set():
-            await self._guard("watch", self.scanner.recheck_watch())
+            if await self._guard("watch", self.scanner.recheck_watch()):
+                # without this, one failed re-check left the watch (and overall health) red forever
+                self.health.mark("watch", True, f"{len(self.scanner.watch)} selected pairs waiting")
             await self._sleep(self.params.watch_interval_seconds)
 
     async def _sleep(self, seconds: float) -> None:
