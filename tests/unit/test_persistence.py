@@ -155,3 +155,37 @@ def test_alerts_and_risk_events_and_funding():
     r.add_funding_payment("arb0001", "A", "BTCUSDT", T0, D("0.0001"), D(1000), D("-0.1"), D("-0.1"))
     fp = r.funding_payments("arb0001")[0]
     assert fp.difference == 0 and fp.rate == D("0.0001")
+
+
+def test_file_database_uses_wal_so_an_outside_reader_never_blocks_the_bot(tmp_path, monkeypatch):
+    """Senior review 2026-09-30: "scanner failed: OperationalError" while another program read the file."""
+    import sqlite3
+    import time
+
+    import app.persistence.repository as repository
+    from app.core.clock import Clock
+    from app.persistence import models as m
+
+    monkeypatch.setattr(repository, "SQLITE_BUSY_TIMEOUT_SECONDS", 0.3)  # keep the writer-lock case quick
+    path = tmp_path / "bot.db"
+    repo = repository.Repository(f"sqlite:///{path}", Clock())
+    repo.record(m.ZeroDeltaProviderEvent, kind="OK", message="first", recorded_at=repo.clock.now())
+    assert sqlite3.connect(path).execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+    reader = sqlite3.connect(path, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM zerodelta_provider_events").fetchone()  # a review script mid-query
+    started = time.monotonic()
+    repo.record(m.ZeroDeltaProviderEvent, kind="OK", message="while read", recorded_at=repo.clock.now())
+    assert time.monotonic() - started < 0.3 and repo.db_ok  # no waiting at all in WAL
+    reader.execute("ROLLBACK")
+
+    writer = sqlite3.connect(path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")  # another program WRITING: the bot waits, then buffers; it never raises
+    repo.record(m.ZeroDeltaProviderEvent, kind="OK", message="buffered", recorded_at=repo.clock.now())
+    assert not repo.db_ok and repo.backlog_size == 1
+    writer.execute("ROLLBACK")
+    repo.record(m.ZeroDeltaProviderEvent, kind="OK", message="after", recorded_at=repo.clock.now())
+    assert repo.db_ok and repo.backlog_size == 0
+    with repo.session() as s:
+        assert [e.message for e in s.query(m.ZeroDeltaProviderEvent)] == ["first", "while read", "buffered", "after"]

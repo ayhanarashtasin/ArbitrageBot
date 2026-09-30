@@ -14,7 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, func, select, update
+from sqlalchemy import create_engine, event, func, select, update
 from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import Session, sessionmaker
@@ -28,6 +28,23 @@ log = logging.getLogger(__name__)
 
 # Connection-level failures only. Integrity errors are bugs and must never be swallowed.
 DB_OUTAGE_ERRORS = (OperationalError, InterfaceError, PoolTimeoutError)
+SQLITE_BUSY_TIMEOUT_SECONDS = 30
+
+
+def _sqlite_wal(dbapi_connection, _record) -> None:
+    """WAL journal: readers never block the bot's writes and the bot's writes never block readers.
+
+    In the default rollback journal, any program holding a read transaction on the file (a review script, a DB
+    browser) makes every writer wait and then fail with "database is locked". The mode is stored in the file, so
+    this only has an effect the first time; if another process holds the file at that moment the mode stays as it is.
+    """
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+    except Exception:  # noqa: BLE001 - keep the current mode rather than refuse to connect
+        log.warning("could not switch SQLite to WAL; keeping the current journal mode")
+    finally:
+        cursor.close()
 MAX_BACKLOG = 20_000
 
 
@@ -46,10 +63,17 @@ class Repository:
         if url.startswith("sqlite:///") and ":memory:" not in url:
             Path(url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
         kwargs = {}
+        file_sqlite = url.startswith("sqlite:///") and ":memory:" not in url
         if url in ("sqlite://", "sqlite:///:memory:"):
             from sqlalchemy.pool import StaticPool
             kwargs = {"poolclass": StaticPool, "connect_args": {"check_same_thread": False}}
+        elif file_sqlite:
+            # Wait up to 30 s for another writer instead of the 5 s default (senior review 2026-09-30: a sweep
+            # died on "database is locked" while the file was being read by another program).
+            kwargs = {"connect_args": {"timeout": SQLITE_BUSY_TIMEOUT_SECONDS}}
         self.engine = create_engine(url, **kwargs)
+        if file_sqlite:
+            event.listen(self.engine, "connect", _sqlite_wal)
         m.Base.metadata.create_all(self.engine)
         self._sessions = sessionmaker(self.engine, expire_on_commit=False)
         self.clock = clock
@@ -79,6 +103,14 @@ class Repository:
             s.add(row)
             s.flush()
             return row
+
+    def record(self, model, **fields) -> None:
+        """Insert a row that nothing reads back at once (discovery, selections, raw history).
+
+        Unlike add(), it is buffered during a database outage (see _resilient) and never raises for one: the
+        scanner used add() for these rows, so one locked write aborted a whole sweep's selection and verification.
+        """
+        self.add(model, **fields)
 
     def audit(self, kind: str, data: dict, trade_id: str | None = None) -> None:
         self.add(m.AuditLog, trade_id=trade_id, kind=kind, data=_json_safe(data), recorded_at=self.clock.now())
@@ -457,7 +489,7 @@ def _get_kv(self: Repository, key: str) -> dict | None:
 
 Repository.set_kv = _resilient(_set_kv)  # type: ignore[method-assign]
 Repository.get_kv = _get_kv  # type: ignore[method-assign]
-for _name in ("audit", "add_decision", "mark_alert_delivered", "add_risk_event", "add_provider_event", "update_trade",
+for _name in ("record", "audit", "add_decision", "mark_alert_delivered", "add_risk_event", "add_provider_event", "update_trade",
               "merge_context", "upsert_leg", "record_slice", "upsert_order", "add_fill", "add_equity_snapshot",
               "add_position_snapshot", "add_funding_payment", "save_paper_account", "release_lease", "set_state"):
     setattr(Repository, _name, _resilient(getattr(Repository, _name)))

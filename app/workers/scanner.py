@@ -36,7 +36,7 @@ from app.execution.venue_provider import UnsupportedVenue
 from app.market_data.earnings import CRYPTO, EarningsCalendar, asset_class
 from app.market_data.volatility import VolScore, candles_needed, low_vol_score
 from app.notifications.notifier import Notifier
-from app.persistence.repository import Repository
+from app.persistence.repository import DB_OUTAGE_ERRORS, Repository
 from app.providers.zerodelta import ZeroDeltaAuthError, ZeroDeltaError, ZeroDeltaProvider, ZeroDeltaRateLimitError
 from app.providers.zerodelta.models import AssetAnalysis
 from app.providers.zerodelta.provider import MAX_HOURLY_DAYS
@@ -153,14 +153,14 @@ class Scanner:
         from app.persistence import models as m
         for mk in analysis.markets:
             s = mk.snapshot
-            self.repo.add(m.ZeroDeltaMarket, asset=analysis.asset, venue_name=s.venue_name,
+            self.repo.record(m.ZeroDeltaMarket, asset=analysis.asset, venue_name=s.venue_name,
                           venue_type=s.venue_type.value, market_identifier=s.market_identifier,
                           funding_rate_raw=s.funding_rate_raw, funding_interval_hours=s.funding_interval_hours,
                           normalized_funding_rate_per_hour=s.normalized_funding_rate_per_hour,
                           avg_24h_volume_usd=s.avg_24h_volume_usd, eligible=mk.eligible,
                           reasons=list(mk.reasons), received_at=analysis.received_at)
             if mk.coverage is not None:
-                self.repo.add(m.ZeroDeltaHistory, asset=analysis.asset, venue_name=s.venue_name,
+                self.repo.record(m.ZeroDeltaHistory, asset=analysis.asset, venue_name=s.venue_name,
                               coverage=mk.coverage.model_dump(mode="json"), status=mk.coverage.status, recorded_at=now)
 
     # ---- direct verification ------------------------------------------------------------------
@@ -484,7 +484,7 @@ class Scanner:
         now = self.clock.now()
         for kind in ("overall", "tradable"):
             for row in selection[kind]:
-                self.repo.add(m.Selection, run_at=now, kind=kind, rank=row["rank"], asset=row["asset"],
+                self.repo.record(m.Selection, run_at=now, kind=kind, rank=row["rank"], asset=row["asset"],
                               long_venue=row["long"], short_venue=row["short"], score_apr=D(str(row["score_apr"])),
                               tradable=row["tradable"], why_not=(row["why_not"] or "")[:200] or None, detail=row)
         self.repo.set_kv("rule_check", {**rule_check, "at": now.isoformat()})
@@ -716,8 +716,9 @@ class Scanner:
                 "outcome": decision.outcome.value, "metrics": decision.metrics,
                 "checks": [c.__dict__ for c in decision.checks]},
                 "asset_class": self._asset_class.get(pair.asset, CRYPTO)}, shadow=shadow)
-        except (RuntimeError, ExchangeError, UnsupportedVenue) as exc:
-            report.note = f"not opened: {exc}"
+        except (RuntimeError, ExchangeError, UnsupportedVenue, *DB_OUTAGE_ERRORS) as exc:
+            # a trade that cannot be recorded is not opened (DB_OUTAGE_ERRORS: the database is locked or down)
+            report.note = f"not opened: {type(exc).__name__}: {exc}"[:300]
             log.warning("could not open trade: %s", exc)
             return False
         (report.shadow_opened if shadow else report.opened).append(trade.id)
@@ -725,7 +726,7 @@ class Scanner:
         from app.persistence import models as m  # audit trail: what Zero Delta reported for this trade (section 43)
         for venue in (pair.long_leg.venue_name, pair.short_leg.venue_name):
             for obs in analysis.histories.get(venue, ()):
-                self.repo.add(m.ZeroDeltaObservation, trade_id=trade.id, venue_name=venue, timestamp=obs.timestamp,
+                self.repo.record(m.ZeroDeltaObservation, trade_id=trade.id, venue_name=venue, timestamp=obs.timestamp,
                               funding_apr=obs.funding_apr,
                               normalized_funding_rate_per_hour=obs.normalized_funding_rate_per_hour)
         self.repo.add_decision(asset=pair.asset, long_venue=pair.long_leg.venue_name,
