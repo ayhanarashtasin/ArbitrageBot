@@ -1,6 +1,7 @@
 """Dashboard API: read-only JSON built from a real scanner run and a real trade."""
 
 import asyncio
+from datetime import timedelta
 from decimal import Decimal as D
 from types import SimpleNamespace
 
@@ -129,6 +130,73 @@ def test_entry_explanation_keeps_shadow_override_and_frozen_funding():
     assert missing["decision"] is None
     assert missing["entry_snapshot"]["min_expected_net_edge_bps"] is None
     assert all(f["rate_pct"] is None for f in missing["entry_snapshot"]["funding"])
+
+
+def test_14_day_average_uses_saved_history_and_original_trade_direction():
+    from app.core.clock import ManualClock
+    from app.persistence.models import ZeroDeltaObservation
+    from tests.execution.test_scanner import FakeZD
+    from tests.providers.helpers import T0, response, row, trace
+
+    now = T0 + timedelta(hours=337)
+    payload = response([row("L", rate=0), row("S", rate=0.24)], [
+        trace("L", list(range(337)), 87.6),
+        trace("S", list(range(337)), [-438.0] * 168 + [350.4] * 169),
+    ])
+    rig = Rig(zd=FakeZD(ManualClock(now), payload), now=now)
+    rig.scan()
+    c, _ = make(rig)
+    snapshot = c.get("/api/trades/arb0001").json()["entry_snapshot"]
+    avg = snapshot["average_funding_14d"]
+    assert avg["available"] is True and avg["reason"] is None
+    assert avg["start"] == T0.isoformat()
+    assert avg["end"] == (T0 + timedelta(days=14)).isoformat()
+    assert [leg["samples"] for leg in avg["legs"]] == [337, 337]
+    assert avg["legs"][0]["mean_apr_pct"] == pytest.approx(87.6)
+    assert avg["legs"][1]["mean_apr_pct"] == pytest.approx((-438 * 168 + 350.4 * 169) / 337)
+    expected_net = (-525.6 * 168 + 262.8 * 169) / 337
+    assert avg["net_apr_pct"] == pytest.approx(expected_net)
+    assert avg["net_rate_per_hour_pct"] == pytest.approx(expected_net / 8760)
+    assert avg["net_apr_pct"] < 0 < snapshot["mean_funding_apr_pct"]  # do not flip the original legs
+    rig.clock.advance(days=21)
+    assert c.get("/api/trades/arb0001").json()["entry_snapshot"]["average_funding_14d"] == avg
+    # A missing internal hour cannot be disguised as complete history by its endpoints.
+    with rig.repo.session() as session:
+        session.query(ZeroDeltaObservation).filter_by(trade_id="arb0001", venue_name="S",
+                                                      timestamp=T0 + timedelta(hours=150)).delete()
+    gap = c.get("/api/trades/arb0001").json()["entry_snapshot"]["average_funding_14d"]
+    assert gap["available"] is False and gap["net_apr_pct"] is None
+    assert gap["legs"][1]["samples"] == 336 and gap["legs"][1]["mean_apr_pct"] is None
+
+
+def test_14_day_average_does_not_label_seven_days_as_fourteen():
+    rig = Rig()
+    rig.scan()
+    c, _ = make(rig)
+    avg = c.get("/api/trades/arb0001").json()["entry_snapshot"]["average_funding_14d"]
+    assert avg["available"] is False and avg["net_apr_pct"] is None
+    assert [leg["samples"] for leg in avg["legs"]] == [169, 169]
+    assert all(leg["mean_apr_pct"] is None for leg in avg["legs"])
+
+
+def test_14_day_average_deduplicates_identical_points_but_rejects_conflicting_rates():
+    from app.api.dashboard import _funding_average_14d
+    from tests.providers.helpers import T0
+
+    end = T0 + timedelta(days=14)
+    trade = SimpleNamespace(long_venue="L", short_venue="S", context={"zero_delta": {"window_end": end.isoformat()}})
+    points = [SimpleNamespace(venue_name=venue, timestamp=T0 + timedelta(hours=i),
+                              normalized_funding_rate_per_hour=D(rate))
+              for venue, rate in (("L", "-0.01"), ("S", "0.02")) for i in range(337)]
+    points.append(points[0])
+    points.append(SimpleNamespace(venue_name="S", timestamp=end + timedelta(hours=1),
+                                  normalized_funding_rate_per_hour=D(99)))
+    avg = _funding_average_14d(trade, points)
+    assert avg["available"] and avg["net_rate_per_hour_pct"] == pytest.approx(0.03)
+    assert avg["legs"][0]["samples"] == 337
+    points.append(SimpleNamespace(venue_name="L", timestamp=T0, normalized_funding_rate_per_hour=D(99)))
+    conflicting = _funding_average_14d(trade, points)
+    assert not conflicting["available"] and conflicting["net_apr_pct"] is None
 
 
 def test_dashboard_endpoints_are_read_only():

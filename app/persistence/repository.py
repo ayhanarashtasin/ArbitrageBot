@@ -287,6 +287,13 @@ class Repository:
         with self.session() as s:
             return list(s.scalars(select(m.FundingPayment).where(m.FundingPayment.trade_id == trade_id)))
 
+    def funding_observations(self, trade_id: str) -> list[m.ZeroDeltaObservation]:
+        """Discovery history frozen when this trade was admitted."""
+        with self.session() as s:
+            return list(s.scalars(select(m.ZeroDeltaObservation)
+                                 .where(m.ZeroDeltaObservation.trade_id == trade_id)
+                                 .order_by(m.ZeroDeltaObservation.timestamp)))
+
     # ---- paper accounts ------------------------------------------------------------------------
     def save_paper_account(self, key: str, state: dict) -> None:
         with self.session() as s:

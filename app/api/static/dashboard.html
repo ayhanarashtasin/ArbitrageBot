@@ -440,6 +440,9 @@ function entryReason(d, expanded = false) {
     const effect = f.rate_pct == null ? "" : Number(f.rate_pct) === 0 ? "no payment" : (f.leg === "long") === (Number(f.rate_pct) > 0) ? "pay" : "receive";
     return metric(`${f.leg === "long" ? "Long" : "Short"} on ${esc(f.venue)}`, f.rate_pct == null ? "not recorded" : `${Number(f.rate_pct) > 0 ? "+" : ""}${fmt(f.rate_pct, 4)}% / ${fmt(f.interval_hours, 0)} h · ${effect}`);
   }).join("");
+  const avg14 = s.average_funding_14d;
+  const avg14Rows = (avg14?.legs || []).map(f => metric(`${f.leg === "long" ? "Long" : "Short"} on ${esc(f.venue)}`,
+    f.mean_rate_per_hour_pct == null ? "not available" : `${fmt(f.mean_rate_per_hour_pct, 6)}% / h · ${fmt(f.mean_apr_pct, 2)}% APR`)).join("");
   const crossChecked = ["long", "short"].every(role => checks.some(c => c.name === role + "_funding_rate_matches" && c.passed));
   return `<div class="entry-reason"><h2>Why this trade opened</h2>
     <span class="pill ${d.shadow ? "warn" : "info"}">${d.shadow ? waived.some(c => c.name === "expected_net_edge") ? "Shadow research · profitability gate bypassed" : "Shadow research trial" : "Gated paper trade"}</span>
@@ -454,6 +457,10 @@ function entryReason(d, expanded = false) {
       ${s.mean_funding_apr_pct == null ? "" : metric("7-day average funding spread", `${fmt(s.mean_funding_apr_pct, 2)}% APR${s.selection_metric === "mean" ? " · selection metric" : ""}`)}
       ${s.twap_entry_duration_minutes == null ? "" : metric("Entry plan", `${fmt(s.twap_entry_duration_minutes / 60, 0)} h TWAP · ${d.entry_plan?.slices ?? "n/a"} slices per leg`)}
     </dl>
+    <h3>14-day average funding (at entry)</h3>
+    ${avg14 ? `<small class="muted">${avg14.start && avg14.end ? `${dt(avg14.start)} → ${dt(avg14.end)} · ` : ""}Saved hourly history; APR is annualized, before fees and slippage.</small>
+      ${avg14Rows ? `<dl class="kv">${avg14Rows}${metric("Net funding spread (short − long)", avg14.available ? `<span class="${cls(avg14.net_apr_pct)}">${fmt(avg14.net_rate_per_hour_pct, 6)}% / h · ${fmt(avg14.net_apr_pct, 2)}% APR</span>` : "not available")}</dl>` : ""}
+      ${avg14.available ? `<small class="muted">${avg14.expected_samples_per_leg} hourly samples per venue across the full 14-day window.</small>` : `<p class="muted">14-day average unavailable: ${esc(avg14.reason)}${avg14.legs?.length ? ` Saved samples: ${avg14.legs.map(f => `${esc(f.venue)} ${f.samples}/${avg14.expected_samples_per_leg}`).join("; ")}.` : ""}</p>`}` : `<p class="muted">14-day average unavailable: the server has not supplied the saved history summary.</p>`}
     ${funding ? `<h3>Saved discovery funding</h3><dl class="kv">${funding}</dl><small class="muted">Zero Delta snapshot${s.funding_as_of ? " as of " + dt(s.funding_as_of) : ""}${crossChecked ? "; both rates passed the direct-venue cross-check before admission" : ""}. Future settlements may differ.</small>` : ""}
     <details id="entry-checks"${expanded ? " open" : ""}><summary>View all ${checks.length} recorded entry checks</summary>
       ${checks.length ? `<dl class="kv">${checks.map(c => `<dt>${esc(label(c))}</dt><dd><b class="${c.passed ? "pos" : c.blocking === "info" ? "why" : "neg"}">${c.passed ? "Passed" : c.blocking === "info" ? "Research-only override" : "Did not pass"}</b><br>${esc(c.value)}<br><span class="muted">Requirement: ${esc(c.limit)}</span></dd>`).join("")}</dl>` : `<p class="muted">No original checks recorded.</p>`}

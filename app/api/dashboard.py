@@ -5,7 +5,7 @@ edges are annualised percent (APR) because that is how people compare funding.
 """
 
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -307,7 +307,50 @@ def _avg_price(orders, leg: str, exit_: bool) -> dict[str, Any] | None:
     return {"avg_price": float(notional / qty), "quantity": float(qty), "notional_usd": float(notional)}
 
 
-def _entry_snapshot(t) -> dict[str, Any]:
+def _funding_average_14d(t, observations) -> dict[str, Any]:
+    """Mean of the saved hourly percent rates; keep the trade's original long/short direction."""
+    end = ((t.context or {}).get("zero_delta") or {}).get("window_end")
+    out = {"available": False, "start": None, "end": None, "expected_samples_per_leg": 337,
+           "legs": [], "net_rate_per_hour_pct": None, "net_apr_pct": None,
+           "reason": "The entry-time funding history window was not recorded."}
+    if not end:
+        return out
+    try:
+        end = as_utc(datetime.fromisoformat(str(end)))
+    except ValueError:
+        return out
+    start = end - timedelta(days=14)
+    out.update(start=_iso(start), end=_iso(end))
+    expected = {start + timedelta(hours=i) for i in range(337)}
+    means, incomplete = {}, []
+    for role in ("long", "short"):
+        venue = getattr(t, role + "_venue")
+        series, conflicting = {}, False
+        for obs in observations:
+            at = as_utc(obs.timestamp)
+            if obs.venue_name != venue or not start <= at <= end:
+                continue
+            rate = obs.normalized_funding_rate_per_hour  # percent/hour, not a fraction or settlement rate
+            if at in series and series[at] != rate:
+                conflicting = True
+            series[at] = rate
+        complete = series.keys() == expected and not conflicting
+        mean = sum(series.values(), Decimal(0)) / len(series) if complete else None
+        means[role] = mean
+        out["legs"].append({"leg": role, "venue": venue, "samples": len(series),
+                            "mean_rate_per_hour_pct": _f(mean),
+                            "mean_apr_pct": None if mean is None else float(mean * 8760)})
+        if not complete:
+            incomplete.append(venue)
+    if incomplete:
+        out["reason"] = "Missing or inconsistent hourly history for " + ", ".join(incomplete) + "."
+        return out
+    net = means["short"] - means["long"]
+    out.update(available=True, reason=None, net_rate_per_hour_pct=float(net), net_apr_pct=float(net * 8760))
+    return out
+
+
+def _entry_snapshot(t, observations=()) -> dict[str, Any]:
     """Frozen discovery rates and thresholds, never today's selection or configuration."""
     ctx = t.context or {}
     pair, params = ctx.get("zero_delta") or {}, ctx.get("params") or {}
@@ -324,6 +367,7 @@ def _entry_snapshot(t) -> dict[str, Any]:
     return {
         "funding": funding, "funding_as_of": pair.get("window_end"),
         "mean_funding_apr_pct": None if mean is None else float(Decimal(str(mean)) * 8760),
+        "average_funding_14d": _funding_average_14d(t, observations),
         "selection_metric": params.get("selection_metric"),
         "min_expected_net_edge_bps": _f(params.get("min_expected_net_edge_bps")),
         "low_vol_max_percentile": _f(params.get("low_vol_max_percentile")),
@@ -357,7 +401,8 @@ def trade_detail(rt: Runtime, trade_id: str) -> dict[str, Any]:
         "funding_cumulative": cum,
         "prices": {"long_entry": _avg_price(orders, "long", False), "short_entry": _avg_price(orders, "short", False),
                    "long_exit": _avg_price(orders, "long", True), "short_exit": _avg_price(orders, "short", True)},
-        "decision": ctx.get("decision"), "entry_snapshot": _entry_snapshot(t),
+        "decision": ctx.get("decision"),
+        "entry_snapshot": _entry_snapshot(t, rt.repo.funding_observations(trade_id)),
         "entry_plan": ctx.get("entry_plan"), "exit": ctx.get("exit"),
         "equity": [{"at": _iso(e.recorded_at), "long_ratio": _f(e.long_ratio), "short_ratio": _f(e.short_ratio),
                     "net_delta_usd": _f(e.net_delta_usd)} for e in eq],
