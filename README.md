@@ -133,23 +133,25 @@ Saved-pick windows overlap between sweeps; their estimates are repeated observat
 
 ## Dashboard
 
-With the bot running, open **http://127.0.0.1:8000/dashboard**. It refreshes every 5 seconds and is built around
-performance, the way a trading dashboard should be:
+With the bot running, open **http://127.0.0.1:8000/dashboard**. It refreshes every 5 seconds (**Pause updates**
+stops that) and has one focused view per job. Every view has its own address, so links and the Back button work:
 
-- **Profit tiles:** net profit (closed plus open), funding earned, fees paid, price moves, trades and win rate,
-  average time to enter, average time held, money at work.
-- **Charts:** net profit over time for all trades, and a per-trade split into funding, price moves and fees.
-- **Trades table:** when each trade entered, how long entry took, how long it was held, how long the exit took,
-  funding, fees, net profit, return, and why it ended.
-- **Each trade in detail:** big net-profit number, an entering / holding / exiting timeline, average prices bought
-  and sold, net profit over time, funding collected, each account's balance against the 30 % and 10 % exit lines,
-  long-versus-short exposure, orders, and every state change.
-- **Scanner section (below):** what the bot looked at, why it did or did not trade, the best opportunities Zero Delta
-  sees, every decision with all its checks, and alerts.
+| View | Address | What it shows |
+|---|---|---|
+| Overview | `#/overview` | status, a one-line summary, 4 headline numbers, the profit curve, open trades, the selected pairs, alerts that need attention |
+| Trades | `#/trades` | every trade (filter All / Open / Closed) and where each trade's profit comes from |
+| One trade | `#/trades/<id>` | profit breakdown and entry progress, then tabs: **Summary** (timing, prices, funding payments), **Charts** (profit, funding, each account against the 30 % / 10 % exits, long vs short exposure), **Why it opened** (entry checks, 14-day funding), **Activity** (state changes, grouped risk events, orders) |
+| The plan | `#/plan` | Alex's four steps with numbers, the selected pairs and the best in the whole market (with exchanges), the walk-forward check, the track record |
+| Scanner | `#/scanner` | the latest sweep as a funnel, why nothing was traded, alerts, every coin with pairs (searchable) |
+| Market | `#/market` | the strongest funding spreads of the latest sweep (search, "tradable only") |
+| Decisions | `#/decisions` | every live check with its measured values (filter passed / waiting / turned down) |
+| Settings | `#/settings` | the rules from the specification, the paper-mode choices, the health of each part |
 
-Open trades show profit "so far" (valued at current prices, before closing costs). It is the same ledger as the final
-number, and it is cross-checked in the tests against the change in account equity. The page is read-only and loads no
-external files. The same data is available as JSON under `/api/*`.
+Open trades show profit "so far" (valued at current prices, before closing costs). If an exchange misses an update,
+the value uses its last price (labelled with its age) and then shows "price unavailable" instead of a wrong number.
+The page is read-only, has a dark and a light theme, works from 390 px phones upwards and loads no external files.
+The same data is available as JSON under `/api/*`. Design rules for adding to the page are in
+`design-system/arbitrage-bot-console/MASTER.md`.
 
 ## Operating it
 
