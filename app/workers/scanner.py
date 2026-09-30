@@ -31,7 +31,7 @@ from app.core.trading_config import DEFAULT_PAPER_FEE_BPS, PAPER_FEES_BPS, Resol
 from app.domain.market import InstrumentMeta
 from app.exchanges.base import ExchangeAdapter, ExchangeError
 from app.exchanges.registry import binding_for
-from app.execution.engine import TradeEngine
+from app.execution.engine import STALE_BOOK_RETRY_SECONDS, TradeEngine
 from app.execution.venue_provider import UnsupportedVenue
 from app.market_data.earnings import CRYPTO, EarningsCalendar, asset_class
 from app.market_data.volatility import VolScore, candles_needed, low_vol_score
@@ -205,6 +205,13 @@ class Scanner:
                 self._prepare(long_src, pair.long_leg), self._prepare(short_src, pair.short_leg))
             long_data, short_data = await asyncio.gather(self._snapshot(long_src, long_meta),
                                                          self._snapshot(short_src, short_meta))
+            limit = self.params.max_market_data_age_ms
+            if max(long_data.book.age_ms(self.clock.now()), short_data.book.age_ms(self.clock.now())) > limit:
+                # one retry of both books: a cached or quiet snapshot often looks old while the next reply is fresh
+                await self.clock.sleep(STALE_BOOK_RETRY_SECONDS)
+                lb, sb = await asyncio.gather(long_src.get_order_book(long_meta.symbol),
+                                              short_src.get_order_book(short_meta.symbol))
+                long_data, short_data = replace(long_data, book=lb), replace(short_data, book=sb)
         except (ExchangeError, UnsupportedVenue, ValueError) as exc:  # ValueError: an adapter refused an argument;
             # one pair must never abort the verification of the others (a Bybit candle cap once did exactly that)
             log.warning("verification of %s/%s failed: %s", pair.long_leg.venue_name, pair.short_leg.venue_name, exc)

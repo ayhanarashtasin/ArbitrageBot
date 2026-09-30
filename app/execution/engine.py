@@ -93,6 +93,7 @@ class ActiveTrade:
     last_obs: Observation | None = None
     asset_class: str | None = None  # the sweep's stock/crypto classification, for the per-slice earnings check
     last_marks: dict[str, tuple[datetime, Decimal]] = field(default_factory=dict)  # leg -> (seen at, last mid)
+    action_changed: bool = True  # the risk action differs from the previous cycle's (alerts fire on changes)
     entry_delay: timedelta = field(default_factory=timedelta)  # how far waiting slices pushed the schedule back
     gate_wait: str | None = None  # why the next entry slice is waiting (spread rule / volatility), None = not waiting
     gate_next_check: datetime | None = None
@@ -103,6 +104,11 @@ class ActiveTrade:
 
 
 MAX_CLEANUP_ATTEMPTS = 5
+# A book older than the limit is fetched ONCE more after this pause before it counts as stale. Measured live
+# 2026-09-30: MEXC's REST depth sometimes returns a cached snapshot older than the one before it, and a quiet book
+# keeps the time of its last change, so one stale-looking reply is common while the next is fresh. A venue whose
+# data really is old stays stale after the retry and still blocks, as before.
+STALE_BOOK_RETRY_SECONDS = 0.5
 # A venue that misses a cycle keeps its last price for the open-trade valuation this long, labelled with its age.
 LAST_KNOWN_PRICE_MAX_AGE = timedelta(minutes=5)
 
@@ -214,7 +220,7 @@ class TradeEngine:
         try:
             acct = await leg.venue.get_account_equity()
             pos = await leg.venue.get_position(leg.meta.symbol)
-            book = await leg.venue.get_order_book(leg.meta.symbol)
+            book = await self._fresh_book(leg)
             fund = await leg.venue.get_funding_info(leg.meta.symbol)
         except ExchangeError:
             obs.reachable[role] = False
@@ -235,6 +241,14 @@ class TradeEngine:
         else:
             obs.short_equity, obs.short_liq_pct, obs.short_margin_pct = equity, liq_pct, margin
         return (abs(pos.quantity) if pos else D(0)), mark
+
+    async def _fresh_book(self, leg: Leg):
+        """The leg's order book; a stale-looking one is fetched once more before it is judged stale."""
+        book = await leg.venue.get_order_book(leg.meta.symbol)
+        if book.age_ms(self.clock.now()) > self.params.max_market_data_age_ms:
+            await self.clock.sleep(STALE_BOOK_RETRY_SECONDS)
+            book = await leg.venue.get_order_book(leg.meta.symbol)
+        return book
 
     async def observe(self, active: ActiveTrade) -> Observation:
         obs = Observation()
@@ -401,6 +415,7 @@ class TradeEngine:
         if self.kill.emergency_flatten and decision.action is not RiskAction.EMERGENCY_EXIT:
             decision = RiskDecision(RiskAction.EMERGENCY_EXIT, 1, ("kill_switch_emergency_flatten",),
                                     decision.long_equity_ratio, decision.short_equity_ratio)
+        active.action_changed = decision.action is not active.last_action
         if decision.action is not active.last_action:
             if decision.action is not RiskAction.CONTINUE:
                 self.repo.add_risk_event(active.id, decision.action.value, decision.priority, decision.reasons)
@@ -440,8 +455,10 @@ class TradeEngine:
         elif a is RiskAction.NORMAL_EXIT and state is S.HEDGED_OPEN:
             await self._begin_exit(active, "normal", active.exit_reason or "normal_exit")
         elif a is RiskAction.PAUSE_SLICES:
-            await self.notifier.alert("stale_direct_data", "market data stale: no new slices",
-                                      severity="warning", trade_id=active.id)
+            if active.action_changed:  # once when data goes stale, not again every 5 s while it stays stale
+                await self.notifier.alert("stale_direct_data",
+                                          "market data stale: no new slices (" + ", ".join(decision.reasons) + ")",
+                                          severity="warning", trade_id=active.id)
             if state is not S.EXITING:
                 return
 
@@ -478,7 +495,10 @@ class TradeEngine:
             long_leg.venue.get_funding_info(long_leg.meta.symbol),
             short_leg.venue.get_funding_info(short_leg.meta.symbol))
         if max(lb.age_ms(self.clock.now()), sb.age_ms(self.clock.now())) > p.max_market_data_age_ms:
-            return "stale_order_book"
+            await self.clock.sleep(STALE_BOOK_RETRY_SECONDS)  # one retry: a cached or quiet snapshot is common
+            lb, sb = await active.executor.books()
+            if max(lb.age_ms(self.clock.now()), sb.age_ms(self.clock.now())) > p.max_market_data_age_ms:
+                return "stale_order_book"
         gap = leg_price_gap_pct(lb, sb)
         if gap is None or gap > p.max_leg_price_gap_pct:
             return "legs_price_gap"

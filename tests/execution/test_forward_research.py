@@ -403,3 +403,32 @@ def test_engine_health_is_red_after_a_failed_loop_or_while_a_trade_is_degraded()
     run(two_passes())
     assert seen_before_second_pass["ok"] is False and seen_before_second_pass["detail"] == "RuntimeError: boom"
     assert calls["n"] >= 2 and health.snapshot()["watch"]["ok"] is True  # green again after the good pass
+
+
+def test_a_stale_looking_book_is_fetched_once_more_but_really_stale_data_still_blocks():
+    """Live 2026-09-30: MEXC's REST depth sometimes returned a cached snapshot OLDER than the previous reply, and a
+    quiet book keeps its last-change time. One retry clears that; data that stays old is still refused, and the
+    stale-data alert fires once per episode instead of every 5 s (INJ had logged 12)."""
+    from tests.unit.helpers import deep_book
+    w = World()
+    enter_fully(w)
+    a = w.engine.active["arb0001"]
+    src = w.src["S"]
+    calls = {"n": 0, "always_stale": False}
+
+    async def flaky_book(symbol, depth=50):
+        calls["n"] += 1
+        stale = calls["always_stale"] or calls["n"] % 2 == 1  # every first fetch of a cycle looks 5 s old
+        return deep_book(mid=src.mid, size=src.size, venue=src.name, now=w.clock.now(), age_ms=5000 if stale else 0)
+
+    src.get_order_book = flaky_book
+    w.clock.advance(seconds=15)
+    obs = run(w.engine.observe(a))
+    assert obs.data_age_ms["short"] <= w.params.max_market_data_age_ms  # the retry was fresh
+    calls["always_stale"] = True
+    before = len(w.alerts("stale_direct_data"))
+    for _ in range(5):
+        w.clock.advance(seconds=5)
+        decision = w.step()[a.id]
+        assert decision.action.value == "PAUSE_SLICES"  # still blocked: the data really is old
+    assert len(w.alerts("stale_direct_data")) - before == 1  # one alert for the whole stale episode
