@@ -92,6 +92,7 @@ class ActiveTrade:
     last_action: RiskAction | None = None
     last_obs: Observation | None = None
     asset_class: str | None = None  # the sweep's stock/crypto classification, for the per-slice earnings check
+    last_marks: dict[str, tuple[datetime, Decimal]] = field(default_factory=dict)  # leg -> (seen at, last mid)
     entry_delay: timedelta = field(default_factory=timedelta)  # how far waiting slices pushed the schedule back
     gate_wait: str | None = None  # why the next entry slice is waiting (spread rule / volatility), None = not waiting
     gate_next_check: datetime | None = None
@@ -102,6 +103,8 @@ class ActiveTrade:
 
 
 MAX_CLEANUP_ATTEMPTS = 5
+# A venue that misses a cycle keeps its last price for the open-trade valuation this long, labelled with its age.
+LAST_KNOWN_PRICE_MAX_AGE = timedelta(minutes=5)
 
 
 class TradeEngine:
@@ -237,6 +240,9 @@ class TradeEngine:
         obs = Observation()
         (lq, lm), (sq, sm) = await asyncio.gather(self._observe_leg(active, active.legs[0], obs),
                                                   self._observe_leg(active, active.legs[1], obs))
+        now = self.clock.now()
+        for role, mark in obs.marks.items():  # remembered so a brief venue outage does not erase the valuation
+            active.last_marks[role] = (now, mark)
         if lq is not None and sq is not None and lm and sm:
             obs.delta = DeltaState(lq * lm, sq * sm)
             active.max_delta_usd = max(active.max_delta_usd, abs(obs.delta.net_usd))
@@ -686,13 +692,30 @@ class TradeEngine:
                                   f"hedge {pnl.hedge_trading:+.4f}, fees {pnl.fees:.4f}, "
                                   f"slippage est. {pnl.slippage_estimate:.4f})", trade_id=active.id)
 
-    def live_pnl(self, active: ActiveTrade):
-        """Net P&L if the open legs were valued at the latest marks (before the cost of closing them).
+    def live_valuation(self, active: ActiveTrade):
+        """(P&L if the open legs were valued now, before closing costs; how it was priced).
 
         Same ledger as the final P&L, so it converges to it: fees and funding already paid are included.
+        How it was priced, "status":
+          live               both legs have a price from this cycle
+          last_known_prices  a leg's venue did not answer this cycle: its last price seen within
+                             LAST_KNOWN_PRICE_MAX_AGE is used, and its age is reported per leg
+          unavailable        an open leg has no price recent enough. The total would leave that leg's whole
+                             position out (a false loss or gain of its full notional), so callers must not show it.
         """
-        marks = dict(active.last_obs.marks) if active.last_obs else {}
-        return compute_pnl(list(active.ledger), list(active.funding_ledger), residual_marks=marks)
+        now = self.clock.now()
+        current = dict(active.last_obs.marks) if active.last_obs else {}
+        marks, age = dict(current), {}
+        for role, (seen, mark) in active.last_marks.items():
+            if role not in marks and now - seen <= LAST_KNOWN_PRICE_MAX_AGE:
+                marks[role], age[role] = mark, (now - seen).total_seconds()
+        pnl = compute_pnl(list(active.ledger), list(active.funding_ledger), residual_marks=marks)
+        stale = {role: secs for role, secs in age.items() if role in pnl.priced_legs}
+        status = "unavailable" if not pnl.complete else ("last_known_prices" if stale else "live")
+        return pnl, {"status": status, "stale_legs_seconds": stale, "unpriced_legs": list(pnl.unpriced_legs)}
+
+    def live_pnl(self, active: ActiveTrade):
+        return self.live_valuation(active)[0]
 
     def compute_trade_pnl(self, active: ActiveTrade):
         """P&L from the in-memory ledger of fills and funding, so it works while the database is down."""

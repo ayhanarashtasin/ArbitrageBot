@@ -194,12 +194,23 @@ def _pnl_numbers(rt: Runtime, t) -> dict[str, Any]:
         p = t.pnl
         return {"live": False, "net": float(p["total_realized_pnl"]), "funding": float(p["funding_pnl"]),
                 "price": float(p["hedge_trading_pnl"]), "fees": float(p["fees"]),
-                "slippage": float(p["slippage_estimate"])}
+                "slippage": float(p["slippage_estimate"]), "status": "final"}
     if active is not None:
-        p = rt.engine.live_pnl(active)
-        return {"live": True, "net": float(p.total), "funding": float(p.funding_net),
-                "price": float(p.hedge_trading), "fees": float(p.fees), "slippage": float(p.slippage_estimate)}
-    return {"live": True, "net": None, "funding": None, "price": None, "fees": None, "slippage": None}
+        p, how = rt.engine.live_valuation(active)
+        if how["status"] == "unavailable":
+            # An unvalued open leg would read as a loss of its whole notional (-$99 on a $0.13 reality): no number.
+            return {"live": True, "net": None, "funding": float(p.funding_net), "price": None,
+                    "fees": float(p.fees), "slippage": float(p.slippage_estimate), "status": "unavailable",
+                    "note": f"no recent price for the {' and '.join(how['unpriced_legs'])} leg (venue unreachable)"}
+        out = {"live": True, "net": float(p.total), "funding": float(p.funding_net), "price": float(p.hedge_trading),
+               "fees": float(p.fees), "slippage": float(p.slippage_estimate), "status": how["status"]}
+        if how["stale_legs_seconds"]:
+            out["stale_legs_seconds"] = how["stale_legs_seconds"]
+            out["note"] = "valued with last-known prices: " + ", ".join(
+                f"{leg} {secs:.0f} s old" for leg, secs in how["stale_legs_seconds"].items())
+        return out
+    return {"live": True, "net": None, "funding": None, "price": None, "fees": None, "slippage": None,
+            "status": "unavailable", "note": "trade not loaded in the engine"}
 
 
 def trades(rt: Runtime) -> list[dict[str, Any]]:

@@ -411,7 +411,7 @@ function renderTrades(list) {
       return `<tr class="click ${t.id === selectedTrade ? "sel" : ""}" tabindex="0" data-id="${esc(t.id)}"><td class="mono">${esc(t.id)}<br><span class="muted">${esc(t.asset)} · ${t.shadow ? "shadow research" : "gated paper"}</span></td><td>${esc(t.long)} → ${esc(t.short)}</td><td>${stateChip(t.state)}</td><td>${dt(tm.entry_started_at)}</td>
         <td class="num">${dur(tm.entry_seconds)}${tm.entry_done ? "" : " …"}</td><td class="num">${dur(tm.hold_seconds)}</td><td class="num">${dur(tm.exit_seconds)}</td>
         <td class="num ${cls(m.funding)}">${signMoney(m.funding)}</td><td class="num">${m.fees == null ? "n/a" : "-" + (money(m.fees) || "$0.00")}</td>
-        <td class="num ${cls(m.net)}"><b>${signMoney(m.net)}</b>${m.live ? `<br><span class="muted">so far</span>` : ""}</td><td class="num ${cls(t.return_pct)}">${t.return_pct == null ? "n/a" : fmt(t.return_pct, 2) + "%"}</td><td class="muted">${esc(t.exit_reason || "")}</td></tr>`; }).join("") + `</tbody>`;
+        <td class="num ${cls(m.net)}"><b>${signMoney(m.net)}</b>${m.live ? `<br><span class="muted">${m.status === "unavailable" ? "price unavailable" : m.status === "last_known_prices" ? "so far · last-known price" : "so far"}</span>` : ""}</td><td class="num ${cls(t.return_pct)}">${t.return_pct == null ? "n/a" : fmt(t.return_pct, 2) + "%"}</td><td class="muted">${esc(t.exit_reason || "")}</td></tr>`; }).join("") + `</tbody>`;
   document.querySelectorAll("#trades tr.click").forEach(r => {
     const open = () => { selectedTrade = r.dataset.id; loadDetail(); renderTrades(data.trades); };
     r.onclick = open; r.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
@@ -435,6 +435,7 @@ function entryReason(d, expanded = false) {
   }
   const metric = (label, value) => `<dt>${label}</dt><dd>${value}</dd>`;
   const netRate = m.net_funding_per_hour == null ? null : Number(m.net_funding_per_hour);
+  const edgeRequirement = s.min_expected_net_edge_bps == null ? checks.find(c => c.name === "expected_net_edge")?.limit : `>= ${fmt(s.min_expected_net_edge_bps, 2)} bps`;
   const funding = (s.funding || []).map(f => {
     const effect = f.rate_pct == null ? "" : Number(f.rate_pct) === 0 ? "no payment" : (f.leg === "long") === (Number(f.rate_pct) > 0) ? "pay" : "receive";
     return metric(`${f.leg === "long" ? "Long" : "Short"} on ${esc(f.venue)}`, f.rate_pct == null ? "not recorded" : `${Number(f.rate_pct) > 0 ? "+" : ""}${fmt(f.rate_pct, 4)}% / ${fmt(f.interval_hours, 0)} h · ${effect}`);
@@ -446,7 +447,7 @@ function entryReason(d, expanded = false) {
     <small class="muted">Recorded at admission: ${dt(d.opened_at)}. These are entry-time values, not current rates.</small>
     <dl class="kv">
       ${metric("Net funding spread at entry", netRate == null ? "not recorded" : `${fmt(netRate * 100, 6)}% / h · ${fmt(netRate * 100 * 8760, 2)}% APR before costs`)}
-      ${metric("Expected edge after costs", m.expected_net_edge_bps == null ? "not recorded" : `${fmt(m.expected_net_edge_bps, 2)} bps${s.min_expected_net_edge_bps == null ? "" : ` · normal minimum ${fmt(s.min_expected_net_edge_bps, 2)} bps`}`)}
+      ${metric("Expected edge after costs", m.expected_net_edge_bps == null ? "not recorded" : `${fmt(m.expected_net_edge_bps, 2)} bps${edgeRequirement ? ` · normal requirement ${esc(edgeRequirement)}` : ""}`)}
       ${metric("Cost calculation assumes", s.expected_hold_hours == null ? "not recorded" : `${fmt(s.expected_hold_hours, 0)} h holding time · fees/slippage are paper assumptions`)}
       ${metric("Volatility at entry", m.low_vol_score == null ? "not recorded" : `${fmt(m.low_vol_score, 2)}${s.low_vol_max_percentile == null ? "" : ` / maximum ${fmt(s.low_vol_max_percentile, 0)}`}`)}
       ${metric("Executable entry spread", m.entry_spread_pct == null ? "not recorded" : `${fmt(m.entry_spread_pct, 4)}%`)}
@@ -488,6 +489,7 @@ async function loadDetail() {
     <div class="panel"><h2>${esc(d.id)} · ${esc(d.asset)} · ${esc(d.long)} → ${esc(d.short)}</h2>
       <div class="bignum ${cls(mm.net)}">${signMoney(mm.net)}</div>
       <div class="muted" style="margin-bottom:8px">${mm.live ? "profit so far (if closed at today's prices, before closing costs)" : "final net profit"} · ${stateChip(d.state)}</div>
+      ${mm.note ? `<div class="muted" style="margin-bottom:8px">⚠ ${esc(mm.note)}</div>` : ""}
       <div class="pnl">${lines.map(([k, v]) => `<div class="line"><span>${k}</span><span class="num ${cls(v)}">${signMoney(v)}</span></div>`).join("")}
         <div class="line total"><span>Net profit</span><span class="num ${cls(mm.net)}">${signMoney(mm.net)}</span></div></div>
       <small class="muted">Slippage (${money(mm.slippage) || "$0.00"} estimate) is already inside the price line.${d.exit ? ` Closed by: ${esc(d.exit.mode)} exit, ${esc(d.exit.reason)}.` : ""}</small>

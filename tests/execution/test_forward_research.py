@@ -312,3 +312,31 @@ def test_venue_labels_beat_venue_hints_so_crypto_is_never_held_to_the_earnings_c
     run(r.scanner._classify_and_check_earnings(found))
     assert r.scanner._asset_class == {"BTC": "crypto", "TSLA": US_EQUITY, "UNLABELLED": "tradfi"}
     assert set(r.scanner._earnings_block) == {"TSLA", "UNLABELLED"}  # fail closed for stocks, never for BTC
+
+
+def test_a_venue_outage_never_shows_the_whole_leg_as_a_loss():
+    """Senior review 2026-09-30: during an AERO outage the API showed -$98.96 while the equity said -$0.13, because the
+    unreachable leg's position was left unvalued. Now: last-known price (labelled, with its age), then unavailable."""
+    from types import SimpleNamespace
+    from app.api.dashboard import _pnl_numbers
+    w = World()
+    enter_fully(w)
+    a = w.engine.active["arb0001"]
+    rt = SimpleNamespace(engine=w.engine, repo=w.repo)
+    trade = w.repo.get_trade(a.id)
+    healthy = _pnl_numbers(rt, trade)
+    assert healthy["status"] == "live" and abs(healthy["net"]) < 5
+    a.executor.long.venue.connected = False  # the long venue stops answering
+    w.clock.advance(seconds=15)
+    w.step()
+    during = _pnl_numbers(rt, trade)
+    assert during["status"] == "last_known_prices" and "long" in during["stale_legs_seconds"]
+    assert abs(during["net"] - healthy["net"]) < 1  # the small real value, never minus the whole $500 leg
+    w.clock.advance(minutes=6)
+    w.step()
+    later = _pnl_numbers(rt, trade)
+    assert later["status"] == "unavailable" and later["net"] is None and "long" in later["note"]
+    a.executor.long.venue.connected = True
+    w.clock.advance(seconds=15)
+    w.step()
+    assert _pnl_numbers(rt, trade)["status"] == "live"

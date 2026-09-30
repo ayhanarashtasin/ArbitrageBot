@@ -42,6 +42,14 @@ class TradePnL:
     funding_expected_vs_actual_difference: Decimal = D(0)
     unrealized_residual: Decimal = D(0)  # included in trading P&L; shown for transparency
     notes: list[str] = field(default_factory=list)
+    unpriced_legs: list[str] = field(default_factory=list)  # legs still holding a position with NO price
+    priced_legs: list[str] = field(default_factory=list)  # legs whose open position was valued at a mark
+
+    @property
+    def complete(self) -> bool:
+        """False when an open leg could not be valued: `total` then leaves out that leg's whole position value,
+        which reads as a loss (or gain) of its full notional. Such a total must never be shown as a result."""
+        return not self.unpriced_legs
 
     @property
     def hedge_trading(self) -> Decimal:
@@ -94,7 +102,9 @@ def compute_pnl(
             mark = (residual_marks or {}).get(leg)
             if mark is None:
                 pnl.notes.append(f"{leg} leg still holds {qty} with no mark price: P&L incomplete")
+                pnl.unpriced_legs.append(leg)
                 continue
+            pnl.priced_legs.append(leg)
             value = qty * mark  # a positive quantity is worth +qty*mark if closed at the mark
             pnl.unrealized_residual += value
             if leg == "long":
