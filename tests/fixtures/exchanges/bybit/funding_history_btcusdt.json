@@ -1,0 +1,61 @@
+{
+ "retCode": 0,
+ "retMsg": "OK",
+ "result": {
+  "category": "linear",
+  "list": [
+   {
+    "symbol": "BTCUSDT",
+    "fundingRate": "0.00002815",
+    "fundingRateTimestamp": "1790668800000"
+   },
+   {
+    "symbol": "BTCUSDT",
+    "fundingRate": "0.0000297",
+    "fundingRateTimestamp": "1790640000000"
+   },
+   {
+    "symbol": "BTCUSDT",
+    "fundingRate": "0.00004941",
+    "fundingRateTimestamp": "1790611200000"
+   },
+   {
+    "symbol": "BTCUSDT",
+    "fundingRate": "-0.00002442",
+    "fundingRateTimestamp": "1790582400000"
+   },
+   {
+    "symbol": "BTCUSDT",
+    "fundingRate": "0.00000962",
+    "fundingRateTimestamp": "1790553600000"
+   },
+   {
+    "symbol": "BTCUSDT",
+    "fundingRate": "0.00003647",
+    "fundingRateTimestamp": "1790524800000"
+   },
+   {
+    "symbol": "BTCUSDT",
+    "fundingRate": "0.00002285",
+    "fundingRateTimestamp": "1790496000000"
+   },
+   {
+    "symbol": "BTCUSDT",
+    "fundingRate": "0.00004892",
+    "fundingRateTimestamp": "1790467200000"
+   },
+   {
+    "symbol": "BTCUSDT",
+    "fundingRate": "-0.00001027",
+    "fundingRateTimestamp": "1790438400000"
+   },
+   {
+    "symbol": "BTCUSDT",
+    "fundingRate": "0.00002446",
+    "fundingRateTimestamp": "1790409600000"
+   }
+  ]
+ },
+ "retExtInfo": {},
+ "time": 1790696128886
+}

@@ -1,0 +1,328 @@
+"""Shared plumbing for the direct-venue PUBLIC market data adapters (Phase 3).
+
+Nothing in here signs a request, sends a key or touches an account/order endpoint. The adapters that
+build on it only ever call public market-data endpoints.
+
+Error policy (project.md sections 53 and 54):
+- reads are retried with bounded exponential backoff (at most MAX_RETRIES_CAP retries) on timeouts,
+  transport errors, HTTP 5xx and HTTP 408 (documented backend timeout) only;
+- HTTP 418/429 (rate limit / IP ban) and 403/451 (WAF, IP rate limit or region block) are NEVER
+  retried and never worked around: the adapter raises ExchangeRequestError with a clear message;
+- error messages carry the venue name, the endpoint path, the status code and the venue's own short
+  error text. They never carry request headers, cookies or full URLs.
+"""
+
+import asyncio
+import json
+import logging
+import time
+from abc import abstractmethod
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+
+import httpx
+
+from app.domain.market import BookLevel, InstrumentMeta, utcnow
+
+from .base import ExchangeAdapter, ExchangeError, ExchangeRequestError
+
+log = logging.getLogger(__name__)
+
+DEFAULT_TIMEOUT_SECONDS = 10.0
+MAX_RETRIES_CAP = 2  # hard upper bound; a larger max_retries is a programming error
+DEFAULT_MAX_RETRIES = 2
+DEFAULT_BACKOFF_SECONDS = 0.5  # doubles per retry: 0.5s, 1.0s
+DEFAULT_INSTRUMENT_TTL_SECONDS = 600.0  # list_instruments() cache: 10 minutes
+USER_AGENT = "funding-arbitrage-bot/0.1 (public market data)"
+
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+# Quote assets that are treated as 1 USD when converting a quote-denominated 24h turnover to USD.
+# For any other quote asset volume_24h_usd is None: no exchange rate is assumed.
+USD_LIKE_QUOTES = frozenset({"USD", "USDT", "USDC", "USD1"})
+
+# Candle durations in milliseconds, keyed by the project-wide timeframe string.
+TIMEFRAME_MS: dict[str, int] = {
+    "1m": 60_000,
+    "3m": 3 * 60_000,
+    "5m": 5 * 60_000,
+    "15m": 15 * 60_000,
+    "30m": 30 * 60_000,
+    "1h": 3_600_000,
+    "2h": 2 * 3_600_000,
+    "4h": 4 * 3_600_000,
+    "6h": 6 * 3_600_000,
+    "8h": 8 * 3_600_000,
+    "12h": 12 * 3_600_000,
+    "1d": 86_400_000,
+}
+
+
+# ---------------------------------------------------------------------------------------------
+# value helpers
+# ---------------------------------------------------------------------------------------------
+def dec(value: Any) -> Decimal:
+    """Exact Decimal from a venue string/int. Rejects None, bool, empty strings, NaN and Infinity."""
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"not a number: {value!r}")
+    result = value if isinstance(value, Decimal) else Decimal(str(value))
+    if not result.is_finite():
+        raise ValueError(f"not a finite number: {value!r}")
+    return result
+
+
+def opt_dec(value: Any) -> Decimal | None:
+    """Like dec() but None/'' (venue 'no value') -> None."""
+    if value is None or value == "":
+        return None
+    return dec(value)
+
+
+def ms_to_dt(value: Any) -> datetime:
+    """Unix epoch milliseconds -> timezone-aware UTC datetime (exact, no float rounding)."""
+    return EPOCH + timedelta(milliseconds=int(value))
+
+
+def opt_ms_to_dt(value: Any) -> datetime | None:
+    """Epoch milliseconds -> datetime; None, '', 0 and '0' (venue 'no time') -> None."""
+    if value is None or value == "":
+        return None
+    ms = int(value)
+    return ms_to_dt(ms) if ms > 0 else None
+
+
+def usd_volume(quote: str, quote_volume: Decimal | None) -> Decimal | None:
+    if quote_volume is None or quote.upper() not in USD_LIKE_QUOTES:
+        return None
+    return quote_volume
+
+
+@contextmanager
+def parsing(venue: str, what: str) -> Iterator[None]:
+    """Turn a malformed/unexpected response shape into ExchangeRequestError (never a bare KeyError)."""
+    try:
+        yield
+    except ExchangeError:
+        raise
+    except (KeyError, IndexError, TypeError, ValueError, ArithmeticError, AttributeError) as exc:
+        raise ExchangeRequestError(
+            f"{venue}: unexpected {what} response ({type(exc).__name__}: {exc})"
+        ) from exc
+
+
+def book_levels(rows: Any, *, descending: bool, depth: int, price_of=None, qty_of=None) -> tuple[BookLevel, ...]:
+    """Parse venue book rows into BookLevels: best price first, zero-size rows dropped, trimmed to depth.
+
+    Sorting is done here (not trusted from the venue) so the OrderBook invariant - bids descending,
+    asks ascending - always holds. Quantities are passed through unchanged: every supported venue
+    quotes public book sizes in BASE asset units (contract multiplier 1).
+    """
+    price_of = price_of or (lambda row: row[0])
+    qty_of = qty_of or (lambda row: row[1])
+    parsed = [BookLevel(price=dec(price_of(r)), quantity=dec(qty_of(r))) for r in rows]
+    parsed = [lvl for lvl in parsed if lvl.quantity > 0]
+    parsed.sort(key=lambda lvl: lvl.price, reverse=descending)
+    return tuple(parsed[:depth])
+
+
+def is_closed(open_time: datetime, timeframe: str, now: datetime) -> bool:
+    return open_time + timedelta(milliseconds=TIMEFRAME_MS[timeframe]) <= now
+
+
+def check_positive(name: str, value: int, maximum: int | None = None) -> None:
+    if value < 1 or (maximum is not None and value > maximum):
+        bound = f"between 1 and {maximum}" if maximum is not None else ">= 1"
+        raise ValueError(f"{name} must be {bound}, got {value}")
+
+
+# ---------------------------------------------------------------------------------------------
+# HTTP
+# ---------------------------------------------------------------------------------------------
+def _error_detail(resp: httpx.Response) -> str:
+    """Short venue error text from a non-200 body (public endpoints only; no headers)."""
+    try:
+        body = json.loads(resp.content)
+    except ValueError:
+        text = resp.text.strip().replace("\n", " ")
+        return text[:120]
+    if isinstance(body, dict):
+        parts = []
+        for key in ("code", "retCode", "msg", "retMsg", "error"):
+            if key in body and body[key] not in (None, ""):
+                parts.append(f"{key}={str(body[key])[:100]}")
+        return ", ".join(parts)
+    return str(body)[:120]
+
+
+class PublicHttp:
+    """Async JSON client for one venue's public REST API."""
+
+    def __init__(
+        self,
+        venue: str,
+        base_url: str,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        backoff_seconds: float = DEFAULT_BACKOFF_SECONDS,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ):
+        if not 0 <= max_retries <= MAX_RETRIES_CAP:
+            raise ValueError(f"max_retries must be between 0 and {MAX_RETRIES_CAP}")
+        self._venue = venue
+        self._max_retries = max_retries
+        self._backoff = backoff_seconds
+        self._sleep = sleep
+        self._http = httpx.AsyncClient(
+            base_url=base_url,
+            timeout=timeout,
+            transport=transport,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        )
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
+
+    async def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        return await self._request("GET", path, params=params)
+
+    async def post_json(self, path: str, body: dict[str, Any]) -> Any:
+        """POST a JSON body. Used for read-only queries (Hyperliquid /info) - never for orders."""
+        return await self._request("POST", path, json_body=body)
+
+    async def _request(self, method: str, path: str, *, params=None, json_body=None) -> Any:
+        venue = self._venue
+        attempts = self._max_retries + 1
+        for attempt in range(attempts):
+            last = attempt == attempts - 1
+            try:
+                resp = await self._http.request(method, path, params=params, json=json_body)
+            except httpx.TimeoutException as exc:
+                if last:
+                    raise ExchangeRequestError(f"{venue}: request timed out ({method} {path})") from exc
+            except httpx.TransportError as exc:
+                if last:
+                    raise ExchangeRequestError(
+                        f"{venue}: connection failed ({type(exc).__name__}) ({method} {path})"
+                    ) from exc
+            except httpx.HTTPError as exc:  # not transport-level: never retried
+                raise ExchangeRequestError(
+                    f"{venue}: HTTP client error ({type(exc).__name__}) ({method} {path})"
+                ) from exc
+            else:
+                status = resp.status_code
+                if status in (418, 429):
+                    retry_after = resp.headers.get("Retry-After", "")
+                    hint = f"; venue asks to wait {retry_after}s" if retry_after.isdigit() else ""
+                    kind = "IP banned for repeated rate-limit violations" if status == 418 else "rate limit exceeded"
+                    raise ExchangeRequestError(
+                        f"{venue}: {kind} (HTTP {status}) on {method} {path}{hint}; not retried"
+                    )
+                if status in (403, 451):
+                    detail = _error_detail(resp)
+                    raise ExchangeRequestError(
+                        f"{venue}: access refused (HTTP {status}: WAF, IP rate limit or region block) "
+                        f"on {method} {path}{'; ' + detail if detail else ''}; not retried"
+                    )
+                if status >= 500 or status == 408:  # 408: Binance "backend response timeout"
+                    if last:
+                        raise ExchangeRequestError(f"{venue}: server error (HTTP {status}) on {method} {path}")
+                elif status != 200:
+                    detail = _error_detail(resp)
+                    raise ExchangeRequestError(
+                        f"{venue}: HTTP {status} on {method} {path}{'; ' + detail if detail else ''}"
+                    )
+                else:
+                    try:
+                        return json.loads(resp.content, parse_float=Decimal)
+                    except ValueError as exc:
+                        raise ExchangeRequestError(f"{venue}: malformed JSON from {method} {path}") from exc
+            delay = self._backoff * (2**attempt)
+            log.warning("%s: %s %s failed, retry %d/%d in %.1fs", venue, method, path, attempt + 1,
+                        attempts - 1, delay)
+            await self._sleep(delay)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+
+# ---------------------------------------------------------------------------------------------
+# instrument cache
+# ---------------------------------------------------------------------------------------------
+class InstrumentCache:
+    """Caches one loader result for `ttl` seconds. Concurrent callers share a single in-flight load.
+
+    A failed refresh never serves stale data (fail closed): the error propagates and the next
+    call tries again.
+    """
+
+    def __init__(
+        self,
+        loader: Callable[[], Awaitable[list[InstrumentMeta]]],
+        ttl_seconds: float,
+        clock: Callable[[], float],
+    ):
+        self._loader = loader
+        self._ttl = ttl_seconds
+        self._clock = clock
+        self._value: list[InstrumentMeta] | None = None
+        self._loaded_at = 0.0
+        self._lock = asyncio.Lock()
+
+    def _fresh(self) -> bool:
+        return self._value is not None and (self._clock() - self._loaded_at) < self._ttl
+
+    async def get(self) -> list[InstrumentMeta]:
+        if not self._fresh():
+            async with self._lock:
+                if not self._fresh():
+                    value = await self._loader()
+                    self._value, self._loaded_at = value, self._clock()
+        assert self._value is not None
+        return list(self._value)
+
+    def invalidate(self) -> None:
+        self._value = None
+
+
+class PublicMarketDataAdapter(ExchangeAdapter):
+    """Common constructor + instrument cache. Account/order methods stay ExchangeNotSupported."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        transport: httpx.AsyncBaseTransport | None = None,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        backoff_seconds: float = DEFAULT_BACKOFF_SECONDS,
+        instrument_ttl_seconds: float = DEFAULT_INSTRUMENT_TTL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        now: Callable[[], datetime] = utcnow,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ):
+        self.base_url = base_url
+        self._now = now
+        self._http = PublicHttp(
+            self.name, base_url, transport=transport, timeout=timeout, max_retries=max_retries,
+            backoff_seconds=backoff_seconds, sleep=sleep,
+        )
+        self._instruments = InstrumentCache(self._load_instruments, instrument_ttl_seconds, clock)
+
+    @abstractmethod
+    async def _load_instruments(self) -> list[InstrumentMeta]: ...
+
+    async def list_instruments(self) -> list[InstrumentMeta]:
+        """All perpetuals the venue lists, cached per adapter instance (default 10 minutes)."""
+        return await self._instruments.get()
+
+    async def close(self) -> None:
+        await self._http.aclose()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        await self.close()

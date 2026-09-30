@@ -1,0 +1,55 @@
+[
+ {
+  "universe": [
+   {
+    "szDecimals": 3,
+    "name": "km:US500",
+    "maxLeverage": 25,
+    "marginTableId": 25,
+    "isDelisted": true,
+    "growthMode": "enabled",
+    "lastFeeScaleChangeTime": "2026-01-07T14:08:58.174529333",
+    "deployerFeeScale": "1.0"
+   },
+   {
+    "szDecimals": 4,
+    "name": "km:GOLD",
+    "maxLeverage": 25,
+    "marginTableId": 25,
+    "onlyIsolated": true,
+    "isDelisted": true,
+    "marginMode": "strictIsolated",
+    "lastFeeScaleChangeTime": "2025-12-22T08:53:47.933405320",
+    "deployerFeeScale": "1.0"
+   }
+  ],
+  "marginTables": [],
+  "collateralToken": 360
+ },
+ [
+  {
+   "funding": "0.0",
+   "openInterest": "0.0",
+   "prevDayPx": "751.2",
+   "dayNtlVlm": "0.0",
+   "premium": null,
+   "oraclePx": "749.64",
+   "markPx": "750.97",
+   "midPx": null,
+   "impactPxs": null,
+   "dayBaseVlm": "0.0"
+  },
+  {
+   "funding": "0.0",
+   "openInterest": "0.0",
+   "prevDayPx": "4348.8",
+   "dayNtlVlm": "0.0",
+   "premium": null,
+   "oraclePx": "4347.7",
+   "markPx": "4348.8",
+   "midPx": null,
+   "impactPxs": null,
+   "dayBaseVlm": "0.0"
+  }
+ ]
+]

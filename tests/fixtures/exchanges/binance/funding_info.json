@@ -1,0 +1,82 @@
+[
+ {
+  "symbol": "LPTUSDT",
+  "adjustedFundingRateCap": "0.02000000",
+  "adjustedFundingRateFloor": "-0.02000000",
+  "fundingIntervalHours": 4,
+  "disclaimer": false,
+  "updateTime": 1752854309429
+ },
+ {
+  "symbol": "ONEUSDT",
+  "adjustedFundingRateCap": "0.02000000",
+  "adjustedFundingRateFloor": "-0.02000000",
+  "fundingIntervalHours": 1,
+  "disclaimer": false,
+  "updateTime": 1790294460768
+ },
+ {
+  "symbol": "1000PEPEUSDT",
+  "adjustedFundingRateCap": "0.02000000",
+  "adjustedFundingRateFloor": "-0.02000000",
+  "fundingIntervalHours": 8,
+  "disclaimer": false,
+  "updateTime": 1697703241715
+ },
+ {
+  "symbol": "TSLAUSDT",
+  "adjustedFundingRateCap": "0.02000000",
+  "adjustedFundingRateFloor": "-0.02000000",
+  "fundingIntervalHours": 8,
+  "disclaimer": false,
+  "updateTime": 1769775454495
+ },
+ {
+  "symbol": "ETHUSDC",
+  "adjustedFundingRateCap": "0.00300",
+  "adjustedFundingRateFloor": "-0.00300",
+  "fundingIntervalHours": 8,
+  "disclaimer": true,
+  "updateTime": null
+ },
+ {
+  "symbol": "ETHUSDT",
+  "adjustedFundingRateCap": "0.00300",
+  "adjustedFundingRateFloor": "-0.00300",
+  "fundingIntervalHours": 8,
+  "disclaimer": true,
+  "updateTime": null
+ },
+ {
+  "symbol": "BTCUSDC",
+  "adjustedFundingRateCap": "0.00300",
+  "adjustedFundingRateFloor": "-0.00300",
+  "fundingIntervalHours": 8,
+  "disclaimer": true,
+  "updateTime": null
+ },
+ {
+  "symbol": "BTCUSDT",
+  "adjustedFundingRateCap": "0.00300",
+  "adjustedFundingRateFloor": "-0.00300",
+  "fundingIntervalHours": 8,
+  "disclaimer": true,
+  "updateTime": null
+ },
+ {
+  "symbol": "ETHBTC",
+  "adjustedFundingRateCap": "0.00375",
+  "adjustedFundingRateFloor": "-0.00375",
+  "fundingIntervalHours": 8,
+  "disclaimer": true,
+  "updateTime": null
+ },
+ {
+  "symbol": "SOLUSDT",
+  "adjustedFundingRateCap": "0.00375",
+  "adjustedFundingRateFloor": "-0.00375",
+  "fundingIntervalHours": 8,
+  "disclaimer": true,
+  "updateTime": null
+ }
+]

@@ -1,0 +1,15 @@
+{
+ "success": true,
+ "code": 0,
+ "data": {
+  "symbol": "XDP_USDT",
+  "fundingRate": -0.001067,
+  "maxFundingRate": 0.03,
+  "minFundingRate": -0.03,
+  "collectCycle": 4,
+  "nextSettleTime": 1790769600000,
+  "timestamp": 1790757838712,
+  "idxPrice": 0.02283,
+  "fairPrice": 0.02275
+ }
+}

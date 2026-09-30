@@ -1,0 +1,33 @@
+# Paper-mode stack: the bot plus PostgreSQL. The API is bound to localhost only: put a reverse proxy with TLS
+# in front of it (or use an SSH tunnel) if you need remote access. Secrets come from .env, never from this file.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: arbitrage
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bot -d arbitrage"]
+      interval: 10s
+      retries: 5
+
+  bot:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      RUN_MODE: paper
+      LIVE_TRADING_ENABLED: "false"
+      DATABASE_URL: postgresql+psycopg://bot:${POSTGRES_PASSWORD}@db:5432/arbitrage
+    ports:
+      - "127.0.0.1:8000:8000"
+
+volumes:
+  pgdata:

@@ -1,0 +1,110 @@
+{
+ "retCode": 0,
+ "retMsg": "OK",
+ "result": {
+  "category": "linear",
+  "list": [
+   {
+    "symbol": "BTCUSDH27",
+    "contractType": "InverseFutures",
+    "status": "Trading",
+    "baseCoin": "BTC",
+    "quoteCoin": "USD",
+    "launchTime": "1789113600000",
+    "deliveryTime": "1806048000000",
+    "deliveryFeeRate": "0.0005",
+    "priceScale": "2",
+    "leverageFilter": {
+     "minLeverage": "1",
+     "maxLeverage": "100.00",
+     "leverageStep": "0.01"
+    },
+    "priceFilter": {
+     "minPrice": "0.50",
+     "maxPrice": "9999999.00",
+     "tickSize": "0.50"
+    },
+    "lotSizeFilter": {
+     "maxOrderQty": "5000000",
+     "minOrderQty": "1",
+     "qtyStep": "1",
+     "postOnlyMaxOrderQty": "5000000",
+     "maxMktOrderQty": "1000000",
+     "minNotionalValue": "5"
+    },
+    "unifiedMarginTrade": true,
+    "fundingInterval": 0,
+    "settleCoin": "BTC",
+    "copyTrading": "none",
+    "upperFundingRate": "0",
+    "lowerFundingRate": "0",
+    "isPreListing": false,
+    "preListingInfo": null,
+    "riskParameters": {
+     "priceLimitRatioX": "0.05",
+     "priceLimitRatioY": "0.1"
+    },
+    "displayName": "BTUUSD0326",
+    "symbolType": "",
+    "forbidUplWithdrawal": false,
+    "symbolId": 2920,
+    "fullName": "Bitcoin",
+    "marketRegion": "",
+    "underlyingTicker": "",
+    "tags": []
+   },
+   {
+    "symbol": "BTCUSDT",
+    "contractType": "LinearPerpetual",
+    "status": "Trading",
+    "baseCoin": "BTC",
+    "quoteCoin": "USDT",
+    "launchTime": "1584230400000",
+    "deliveryTime": "0",
+    "deliveryFeeRate": "",
+    "priceScale": "2",
+    "leverageFilter": {
+     "minLeverage": "1",
+     "maxLeverage": "150.00",
+     "leverageStep": "0.01"
+    },
+    "priceFilter": {
+     "minPrice": "0.10",
+     "maxPrice": "1999999.80",
+     "tickSize": "0.10"
+    },
+    "lotSizeFilter": {
+     "maxOrderQty": "1500.000",
+     "minOrderQty": "0.001",
+     "qtyStep": "0.001",
+     "postOnlyMaxOrderQty": "1500.000",
+     "maxMktOrderQty": "150.000",
+     "minNotionalValue": "5"
+    },
+    "unifiedMarginTrade": true,
+    "fundingInterval": 480,
+    "settleCoin": "USDT",
+    "copyTrading": "both",
+    "upperFundingRate": "0.00333",
+    "lowerFundingRate": "-0.00333",
+    "isPreListing": false,
+    "preListingInfo": null,
+    "riskParameters": {
+     "priceLimitRatioX": "0.01",
+     "priceLimitRatioY": "0.02"
+    },
+    "displayName": "BTCUSDT",
+    "symbolType": "",
+    "forbidUplWithdrawal": false,
+    "symbolId": 5,
+    "fullName": "Bitcoin",
+    "marketRegion": "",
+    "underlyingTicker": "",
+    "tags": []
+   }
+  ],
+  "nextPageCursor": "first%3DBTCUSDH27%26last%3DBTCUSDT"
+ },
+ "retExtInfo": {},
+ "time": 1790696128148
+}

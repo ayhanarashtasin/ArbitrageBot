@@ -1,0 +1,110 @@
+{
+ "retCode": 0,
+ "retMsg": "OK",
+ "result": {
+  "category": "linear",
+  "list": [
+   {
+    "symbol": "BTCPERP",
+    "contractType": "LinearPerpetual",
+    "status": "Trading",
+    "baseCoin": "BTC",
+    "quoteCoin": "USDC",
+    "launchTime": "1610604231000",
+    "deliveryTime": "0",
+    "deliveryFeeRate": "",
+    "priceScale": "2",
+    "leverageFilter": {
+     "minLeverage": "1",
+     "maxLeverage": "125.00",
+     "leverageStep": "0.01"
+    },
+    "priceFilter": {
+     "minPrice": "0.10",
+     "maxPrice": "1999999.80",
+     "tickSize": "0.10"
+    },
+    "lotSizeFilter": {
+     "maxOrderQty": "1000.000",
+     "minOrderQty": "0.001",
+     "qtyStep": "0.001",
+     "postOnlyMaxOrderQty": "1000.000",
+     "maxMktOrderQty": "200.000",
+     "minNotionalValue": "5"
+    },
+    "unifiedMarginTrade": true,
+    "fundingInterval": 480,
+    "settleCoin": "USDC",
+    "copyTrading": "none",
+    "upperFundingRate": "0.005",
+    "lowerFundingRate": "-0.005",
+    "isPreListing": false,
+    "preListingInfo": null,
+    "riskParameters": {
+     "priceLimitRatioX": "0.03",
+     "priceLimitRatioY": "0.05"
+    },
+    "displayName": "BTCUSDC",
+    "symbolType": "",
+    "forbidUplWithdrawal": false,
+    "symbolId": 45,
+    "fullName": "Bitcoin",
+    "marketRegion": "",
+    "underlyingTicker": "",
+    "tags": []
+   },
+   {
+    "symbol": "BTCUSD",
+    "contractType": "InversePerpetual",
+    "status": "Trading",
+    "baseCoin": "BTC",
+    "quoteCoin": "USD",
+    "launchTime": "1542211200000",
+    "deliveryTime": "0",
+    "deliveryFeeRate": "",
+    "priceScale": "2",
+    "leverageFilter": {
+     "minLeverage": "1",
+     "maxLeverage": "100.00",
+     "leverageStep": "0.01"
+    },
+    "priceFilter": {
+     "minPrice": "0.10",
+     "maxPrice": "1999999.80",
+     "tickSize": "0.10"
+    },
+    "lotSizeFilter": {
+     "maxOrderQty": "25000000",
+     "minOrderQty": "1",
+     "qtyStep": "1",
+     "postOnlyMaxOrderQty": "25000000",
+     "maxMktOrderQty": "5000000",
+     "minNotionalValue": "5"
+    },
+    "unifiedMarginTrade": true,
+    "fundingInterval": 480,
+    "settleCoin": "BTC",
+    "copyTrading": "none",
+    "upperFundingRate": "0.005",
+    "lowerFundingRate": "-0.005",
+    "isPreListing": false,
+    "preListingInfo": null,
+    "riskParameters": {
+     "priceLimitRatioX": "0.03",
+     "priceLimitRatioY": "0.05"
+    },
+    "displayName": "BTCUSD",
+    "symbolType": "",
+    "forbidUplWithdrawal": false,
+    "symbolId": 1,
+    "fullName": "Bitcoin",
+    "marketRegion": "",
+    "underlyingTicker": "",
+    "tags": []
+   }
+  ],
+  "nextPageCursor": "first%3DBTCPERP%26last%3DBTCUSD"
+ },
+ "retExtInfo": {},
+ "time": 1790696128062
+}

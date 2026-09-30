@@ -1,0 +1,56 @@
+{
+ "code": "0",
+ "msg": "success",
+ "data": [
+  {
+   "instId": "BTC-USDT",
+   "fundingRate": "-0.000098",
+   "fundingTime": "1790755200000"
+  },
+  {
+   "instId": "BTC-USDT",
+   "fundingRate": "-0.000042",
+   "fundingTime": "1790726400000"
+  },
+  {
+   "instId": "BTC-USDT",
+   "fundingRate": "-0.000105",
+   "fundingTime": "1790697600000"
+  },
+  {
+   "instId": "BTC-USDT",
+   "fundingRate": "-0.000051",
+   "fundingTime": "1790668800000"
+  },
+  {
+   "instId": "BTC-USDT",
+   "fundingRate": "-0.000081",
+   "fundingTime": "1790640000000"
+  },
+  {
+   "instId": "BTC-USDT",
+   "fundingRate": "-0.000055",
+   "fundingTime": "1790611200000"
+  },
+  {
+   "instId": "BTC-USDT",
+   "fundingRate": "-0.000101",
+   "fundingTime": "1790582400000"
+  },
+  {
+   "instId": "BTC-USDT",
+   "fundingRate": "0.000082",
+   "fundingTime": "1790553600000"
+  },
+  {
+   "instId": "BTC-USDT",
+   "fundingRate": "0.000042",
+   "fundingTime": "1790524800000"
+  },
+  {
+   "instId": "BTC-USDT",
+   "fundingRate": "0.000054",
+   "fundingTime": "1790496000000"
+  }
+ ]
+}

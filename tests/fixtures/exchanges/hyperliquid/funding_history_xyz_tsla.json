@@ -1,0 +1,62 @@
+[
+ {
+  "coin": "xyz:TSLA",
+  "fundingRate": "0.00000625",
+  "premium": "0.0003286092",
+  "time": 1790661600024
+ },
+ {
+  "coin": "xyz:TSLA",
+  "fundingRate": "0.00000625",
+  "premium": "0.0002764761",
+  "time": 1790665200045
+ },
+ {
+  "coin": "xyz:TSLA",
+  "fundingRate": "0.00000625",
+  "premium": "0.000337308",
+  "time": 1790668800049
+ },
+ {
+  "coin": "xyz:TSLA",
+  "fundingRate": "0.00000625",
+  "premium": "0.0003410074",
+  "time": 1790672400050
+ },
+ {
+  "coin": "xyz:TSLA",
+  "fundingRate": "0.0000105121",
+  "premium": "0.0004681938",
+  "time": 1790676000041
+ },
+ {
+  "coin": "xyz:TSLA",
+  "fundingRate": "0.0000141188",
+  "premium": "0.0005259015",
+  "time": 1790679600030
+ },
+ {
+  "coin": "xyz:TSLA",
+  "fundingRate": "0.0000169726",
+  "premium": "0.0005715617",
+  "time": 1790683200051
+ },
+ {
+  "coin": "xyz:TSLA",
+  "fundingRate": "0.0000198632",
+  "premium": "0.0006178118",
+  "time": 1790686800058
+ },
+ {
+  "coin": "xyz:TSLA",
+  "fundingRate": "0.0000207814",
+  "premium": "0.000632503",
+  "time": 1790690400028
+ },
+ {
+  "coin": "xyz:TSLA",
+  "fundingRate": "0.0000216381",
+  "premium": "0.0006462099",
+  "time": 1790694000109
+ }
+]

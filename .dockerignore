@@ -1,0 +1,7 @@
+.env
+.git
+__pycache__
+*.pyc
+Capture_zero_Delta
+data
+tests

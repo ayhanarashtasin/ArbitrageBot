@@ -1,0 +1,12 @@
+{
+ "code": "0",
+ "msg": "success",
+ "data": [
+  {
+   "instId": "BTC-USDT",
+   "indexPrice": "83055.8",
+   "markPrice": "83010.9",
+   "ts": "1790757413283"
+  }
+ ]
+}

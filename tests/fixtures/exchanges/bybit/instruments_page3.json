@@ -1,0 +1,110 @@
+{
+ "retCode": 0,
+ "retMsg": "OK",
+ "result": {
+  "category": "linear",
+  "list": [
+   {
+    "symbol": "BTCUSDT-02OCT26",
+    "contractType": "LinearFutures",
+    "status": "Trading",
+    "baseCoin": "BTC",
+    "quoteCoin": "USDT",
+    "launchTime": "1789113600000",
+    "deliveryTime": "1790928000000",
+    "deliveryFeeRate": "0",
+    "priceScale": "1",
+    "leverageFilter": {
+     "minLeverage": "1",
+     "maxLeverage": "50.00",
+     "leverageStep": "0.01"
+    },
+    "priceFilter": {
+     "minPrice": "0.1",
+     "maxPrice": "1999999.8",
+     "tickSize": "0.1"
+    },
+    "lotSizeFilter": {
+     "maxOrderQty": "10.000",
+     "minOrderQty": "0.001",
+     "qtyStep": "0.001",
+     "postOnlyMaxOrderQty": "10.000",
+     "maxMktOrderQty": "10.000",
+     "minNotionalValue": "5"
+    },
+    "unifiedMarginTrade": true,
+    "fundingInterval": 0,
+    "settleCoin": "USDT",
+    "copyTrading": "none",
+    "upperFundingRate": "0",
+    "lowerFundingRate": "0",
+    "isPreListing": false,
+    "preListingInfo": null,
+    "riskParameters": {
+     "priceLimitRatioX": "0.05",
+     "priceLimitRatioY": "0.1"
+    },
+    "displayName": "BTCUSDT-02OCT26",
+    "symbolType": "",
+    "forbidUplWithdrawal": false,
+    "symbolId": 1483,
+    "fullName": "Bitcoin",
+    "marketRegion": "",
+    "underlyingTicker": "",
+    "tags": []
+   },
+   {
+    "symbol": "BTCUSDT-09OCT26",
+    "contractType": "LinearFutures",
+    "status": "Trading",
+    "baseCoin": "BTC",
+    "quoteCoin": "USDT",
+    "launchTime": "1789718400000",
+    "deliveryTime": "1791532800000",
+    "deliveryFeeRate": "0",
+    "priceScale": "1",
+    "leverageFilter": {
+     "minLeverage": "1",
+     "maxLeverage": "50.00",
+     "leverageStep": "0.01"
+    },
+    "priceFilter": {
+     "minPrice": "0.1",
+     "maxPrice": "1999999.8",
+     "tickSize": "0.1"
+    },
+    "lotSizeFilter": {
+     "maxOrderQty": "10.000",
+     "minOrderQty": "0.001",
+     "qtyStep": "0.001",
+     "postOnlyMaxOrderQty": "10.000",
+     "maxMktOrderQty": "10.000",
+     "minNotionalValue": "5"
+    },
+    "unifiedMarginTrade": true,
+    "fundingInterval": 0,
+    "settleCoin": "USDT",
+    "copyTrading": "none",
+    "upperFundingRate": "0",
+    "lowerFundingRate": "0",
+    "isPreListing": false,
+    "preListingInfo": null,
+    "riskParameters": {
+     "priceLimitRatioX": "0.05",
+     "priceLimitRatioY": "0.1"
+    },
+    "displayName": "BTCUSDT-09OCT26",
+    "symbolType": "",
+    "forbidUplWithdrawal": false,
+    "symbolId": 1491,
+    "fullName": "Bitcoin",
+    "marketRegion": "",
+    "underlyingTicker": "",
+    "tags": []
+   }
+  ],
+  "nextPageCursor": ""
+ },
+ "retExtInfo": {},
+ "time": 1790696128365
+}

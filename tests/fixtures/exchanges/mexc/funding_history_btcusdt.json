@@ -1,0 +1,72 @@
+{
+ "success": true,
+ "code": 0,
+ "data": {
+  "pageSize": 10,
+  "totalCount": 1620,
+  "totalPage": 162,
+  "currentPage": 1,
+  "resultList": [
+   {
+    "symbol": "BTC_USDT",
+    "fundingRate": 0,
+    "settleTime": 1790755200000,
+    "collectCycle": 8
+   },
+   {
+    "symbol": "BTC_USDT",
+    "fundingRate": 0.000077,
+    "settleTime": 1790726400000,
+    "collectCycle": 8
+   },
+   {
+    "symbol": "BTC_USDT",
+    "fundingRate": 0.000014,
+    "settleTime": 1790697600000,
+    "collectCycle": 8
+   },
+   {
+    "symbol": "BTC_USDT",
+    "fundingRate": 0.000067,
+    "settleTime": 1790668800000,
+    "collectCycle": 8
+   },
+   {
+    "symbol": "BTC_USDT",
+    "fundingRate": 0.000038,
+    "settleTime": 1790640000000,
+    "collectCycle": 8
+   },
+   {
+    "symbol": "BTC_USDT",
+    "fundingRate": 0.000064,
+    "settleTime": 1790611200000,
+    "collectCycle": 8
+   },
+   {
+    "symbol": "BTC_USDT",
+    "fundingRate": -0.000025,
+    "settleTime": 1790582400000,
+    "collectCycle": 8
+   },
+   {
+    "symbol": "BTC_USDT",
+    "fundingRate": 0.00002,
+    "settleTime": 1790553600000,
+    "collectCycle": 8
+   },
+   {
+    "symbol": "BTC_USDT",
+    "fundingRate": 0.00001,
+    "settleTime": 1790524800000,
+    "collectCycle": 8
+   },
+   {
+    "symbol": "BTC_USDT",
+    "fundingRate": 0.000013,
+    "settleTime": 1790496000000,
+    "collectCycle": 8
+   }
+  ]
+ }
+}

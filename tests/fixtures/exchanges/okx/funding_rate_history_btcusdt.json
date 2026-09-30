@@ -1,0 +1,96 @@
+{
+ "code": "0",
+ "data": [
+  {
+   "formulaType": "withRate",
+   "fundingRate": "0.0000337200721784",
+   "fundingTime": "1790755200000",
+   "instId": "BTC-USDT-SWAP",
+   "instType": "SWAP",
+   "method": "current_period",
+   "realizedRate": "0.0000337200721784"
+  },
+  {
+   "formulaType": "withRate",
+   "fundingRate": "0.0001",
+   "fundingTime": "1790726400000",
+   "instId": "BTC-USDT-SWAP",
+   "instType": "SWAP",
+   "method": "current_period",
+   "realizedRate": "0.0001"
+  },
+  {
+   "formulaType": "withRate",
+   "fundingRate": "0.0000329384702947",
+   "fundingTime": "1790697600000",
+   "instId": "BTC-USDT-SWAP",
+   "instType": "SWAP",
+   "method": "current_period",
+   "realizedRate": "0.0000329384702947"
+  },
+  {
+   "formulaType": "withRate",
+   "fundingRate": "0.0000254900915325",
+   "fundingTime": "1790668800000",
+   "instId": "BTC-USDT-SWAP",
+   "instType": "SWAP",
+   "method": "current_period",
+   "realizedRate": "0.0000254900915325"
+  },
+  {
+   "formulaType": "withRate",
+   "fundingRate": "0.0000543754330817",
+   "fundingTime": "1790640000000",
+   "instId": "BTC-USDT-SWAP",
+   "instType": "SWAP",
+   "method": "current_period",
+   "realizedRate": "0.0000543754330817"
+  },
+  {
+   "formulaType": "withRate",
+   "fundingRate": "0.0000709507874477",
+   "fundingTime": "1790611200000",
+   "instId": "BTC-USDT-SWAP",
+   "instType": "SWAP",
+   "method": "current_period",
+   "realizedRate": "0.0000709507874477"
+  },
+  {
+   "formulaType": "withRate",
+   "fundingRate": "-0.0000076067766736",
+   "fundingTime": "1790582400000",
+   "instId": "BTC-USDT-SWAP",
+   "instType": "SWAP",
+   "method": "current_period",
+   "realizedRate": "-0.0000076067766736"
+  },
+  {
+   "formulaType": "withRate",
+   "fundingRate": "0.0000459235224734",
+   "fundingTime": "1790553600000",
+   "instId": "BTC-USDT-SWAP",
+   "instType": "SWAP",
+   "method": "current_period",
+   "realizedRate": "0.0000459235224734"
+  },
+  {
+   "formulaType": "withRate",
+   "fundingRate": "-0.0000107439144441",
+   "fundingTime": "1790524800000",
+   "instId": "BTC-USDT-SWAP",
+   "instType": "SWAP",
+   "method": "current_period",
+   "realizedRate": "-0.0000107439144441"
+  },
+  {
+   "formulaType": "withRate",
+   "fundingRate": "-0.0000181443987004",
+   "fundingTime": "1790496000000",
+   "instId": "BTC-USDT-SWAP",
+   "instType": "SWAP",
+   "method": "current_period",
+   "realizedRate": "-0.0000181443987004"
+  }
+ ],
+ "msg": ""
+}

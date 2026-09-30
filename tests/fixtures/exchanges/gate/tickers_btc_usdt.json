@@ -1,0 +1,24 @@
+[
+ {
+  "last": "83042.9",
+  "low_24h": "82863.5",
+  "high_24h": "84521.1",
+  "volume_24h": "527445510",
+  "change_percentage": "-0.88",
+  "change_price": "-734.1",
+  "funding_rate_indicative": "-0.000027",
+  "index_price": "83087.53",
+  "volume_24h_base": "52744",
+  "volume_24h_quote": "4405991196",
+  "contract": "BTC_USDT",
+  "volume_24h_settle": "4405991196",
+  "funding_rate": "-0.000027",
+  "mark_price": "83045.51",
+  "total_size": "511606200",
+  "highest_bid": "83042.9",
+  "highest_size": "121937",
+  "lowest_ask": "83043",
+  "lowest_size": "41641",
+  "quanto_multiplier": "0.0001"
+ }
+]

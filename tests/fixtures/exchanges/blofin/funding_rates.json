@@ -1,0 +1,96 @@
+{
+ "code": "0",
+ "msg": "success",
+ "data": [
+  {
+   "instId": "ETH-USDC",
+   "fundingRate": "0.0002004",
+   "fundingTime": "1790784000000",
+   "fundingInterval": "8",
+   "fundingIntervalUnit": "hour",
+   "fundingRateCap": "0.005",
+   "fundingRateFloor": "-0.005"
+  },
+  {
+   "instId": "BTC-USDT",
+   "fundingRate": "-0.00004548",
+   "fundingTime": "1790784000000",
+   "fundingInterval": "8",
+   "fundingIntervalUnit": "hour",
+   "fundingRateCap": "0.005",
+   "fundingRateFloor": "-0.005"
+  },
+  {
+   "instId": "ONE-USDT",
+   "fundingRate": "-0.00033525728945899507",
+   "fundingTime": "1790758800000",
+   "fundingInterval": "1",
+   "fundingIntervalUnit": "hour",
+   "fundingRateCap": "0.05",
+   "fundingRateFloor": "-0.05"
+  },
+  {
+   "instId": "TSLA-USDT",
+   "fundingRate": "0.00028189",
+   "fundingTime": "1790784000000",
+   "fundingInterval": "8",
+   "fundingIntervalUnit": "hour",
+   "fundingRateCap": "0.03",
+   "fundingRateFloor": "-0.03"
+  },
+  {
+   "instId": "BTC-USD",
+   "fundingRate": "0.00007170583779259713",
+   "fundingTime": "1790784000000",
+   "fundingInterval": "8",
+   "fundingIntervalUnit": "hour",
+   "fundingRateCap": "0.02",
+   "fundingRateFloor": "-0.02"
+  },
+  {
+   "instId": "SOL-USDT",
+   "fundingRate": "0.000029",
+   "fundingTime": "1790784000000",
+   "fundingInterval": "8",
+   "fundingIntervalUnit": "hour",
+   "fundingRateCap": "0.05",
+   "fundingRateFloor": "-0.05"
+  },
+  {
+   "instId": "RARE-USDT",
+   "fundingRate": "-0.0001089513297994827",
+   "fundingTime": "1790769600000",
+   "fundingInterval": "4",
+   "fundingIntervalUnit": "hour",
+   "fundingRateCap": "0.04",
+   "fundingRateFloor": "-0.04"
+  },
+  {
+   "instId": "ETH-USDT",
+   "fundingRate": "0.00016508",
+   "fundingTime": "1790784000000",
+   "fundingInterval": "8",
+   "fundingIntervalUnit": "hour",
+   "fundingRateCap": "0.0075",
+   "fundingRateFloor": "-0.0075"
+  },
+  {
+   "instId": "SHIB-USDT",
+   "fundingRate": "0.00022",
+   "fundingTime": "1790784000000",
+   "fundingInterval": "8",
+   "fundingIntervalUnit": "hour",
+   "fundingRateCap": "0.05",
+   "fundingRateFloor": "-0.05"
+  },
+  {
+   "instId": "BTC-USDC",
+   "fundingRate": "-0.00010664",
+   "fundingTime": "1790784000000",
+   "fundingInterval": "8",
+   "fundingIntervalUnit": "hour",
+   "fundingRateCap": "0.005",
+   "fundingRateFloor": "-0.005"
+  }
+ ]
+}

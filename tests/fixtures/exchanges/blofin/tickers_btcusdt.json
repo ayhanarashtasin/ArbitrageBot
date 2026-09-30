@@ -1,0 +1,21 @@
+{
+ "code": "0",
+ "msg": "success",
+ "data": [
+  {
+   "instId": "BTC-USDT",
+   "last": "83012.9",
+   "lastSize": "10",
+   "askPrice": "83012.9",
+   "askSize": "7993",
+   "bidPrice": "83012.8",
+   "bidSize": "235",
+   "high24h": "84510",
+   "open24h": "83898.9",
+   "low24h": "82873.2",
+   "volCurrency24h": "2365.5282",
+   "vol24h": "2365528.2",
+   "ts": "1790757412842"
+  }
+ ]
+}

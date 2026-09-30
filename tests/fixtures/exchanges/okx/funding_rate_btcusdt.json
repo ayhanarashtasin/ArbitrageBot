@@ -1,0 +1,25 @@
+{
+ "code": "0",
+ "data": [
+  {
+   "formulaType": "withRate",
+   "fundingRate": "0.0000248456077781",
+   "fundingTime": "1790784000000",
+   "impactValue": "20000.0000000000000000",
+   "instId": "BTC-USDT-SWAP",
+   "instType": "SWAP",
+   "interestRate": "0.0001000000000000",
+   "maxFundingRate": "0.00375",
+   "method": "current_period",
+   "minFundingRate": "-0.00375",
+   "nextFundingRate": "",
+   "nextFundingTime": "1790812800000",
+   "premium": "-0.0004718974249089",
+   "prevFundingTime": "1790755200000",
+   "settFundingRate": "0.0000337200721784",
+   "settState": "settled",
+   "ts": "1790757318027"
+  }
+ ],
+ "msg": ""
+}

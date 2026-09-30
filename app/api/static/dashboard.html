@@ -1,0 +1,629 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arbitrage Bot Dashboard</title>
+<style>
+:root{
+  --bg:#f3f6f8; --panel:#fff; --ink:#172a39; --muted:#526676; --line:#dce5e9; --soft:#edf2f4;
+  --accent:#087a75; --accent-soft:#def3ef;
+  --good:#13734c; --good-soft:#ddf3e7; --warn:#92520c; --warn-soft:#fff0d9; --bad:#ad343e; --bad-soft:#fce7e8;
+  --info:#345fac; --info-soft:#e6edfa;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0c1621; --panel:#14222e; --ink:#edf5f7; --muted:#aebfca; --line:#304352; --soft:#203341;
+  --accent:#6fe0cb; --accent-soft:#173f42;
+  --good:#80dfab; --good-soft:#173e35; --warn:#f2c27d; --warn-soft:#49351e; --bad:#ff9da4; --bad-soft:#492b37;
+  --info:#a5c2fb; --info-soft:#243b5d; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0c1621; --panel:#14222e; --ink:#edf5f7; --muted:#aebfca; --line:#304352; --soft:#203341;
+  --accent:#6fe0cb; --accent-soft:#173f42;
+  --good:#80dfab; --good-soft:#173e35; --warn:#f2c27d; --warn-soft:#49351e; --bad:#ff9da4; --bad-soft:#492b37;
+  --info:#a5c2fb; --info-soft:#243b5d; color-scheme:dark}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 var(--sans)}
+[hidden]{display:none!important}
+a{color:inherit}
+.skip{position:absolute;left:16px;top:-100px;z-index:20;background:var(--panel);color:var(--ink);padding:10px 16px;border-radius:8px}
+.skip:focus{top:12px}
+.app-shell{display:grid;grid-template-columns:228px minmax(0,1fr);min-height:100vh}
+.sidebar{background:#102331;color:#ebf5f5;padding:28px 16px;display:flex;flex-direction:column;gap:36px;border-right:1px solid #264250}
+.sidebar-inner{position:sticky;top:28px;display:flex;flex-direction:column;gap:36px}
+.brand{display:flex;align-items:center;gap:12px;padding:0 12px;text-decoration:none;font-size:1.08rem;font-weight:750;letter-spacing:-.04em}
+.brand-mark{width:32px;height:32px;display:grid;place-items:center;background:#3ac8b4;border-radius:9px;transform:rotate(-9deg)}
+.brand-mark:before{content:"";width:13px;height:13px;border:3px solid #102331;border-left:0;border-bottom:0;transform:rotate(45deg) translate(-2px,2px)}
+.brand small{display:block;font-size:.66rem;letter-spacing:.12em;font-weight:650;text-transform:uppercase;color:#9fbdc3}
+.nav-label,.sidebar-foot small{display:block;color:#9fbdc3;text-transform:uppercase;letter-spacing:.13em;font-size:.67rem;font-weight:700;margin:0 12px 12px}
+.nav-links{display:grid;gap:3px}
+.nav-links a{display:flex;align-items:center;gap:13px;padding:10px 12px;border-radius:9px;text-decoration:none;font-size:.86rem;font-weight:550;color:#c4d6d9;min-height:44px;transition:background .18s,color .18s}
+.nav-links a:hover,.nav-links a:focus-visible{background:#213e49;color:#fff}
+.nav-index{font:600 .7rem var(--mono);color:#7fa3aa}
+.sidebar-foot{margin-top:auto;padding:16px 12px 0;border-top:1px solid #2a4350;font-size:.78rem;color:#aac4c7}
+.sidebar-foot small{margin:0 0 4px}
+.workspace{min-width:0;width:100%;max-width:1600px;margin:0 auto;padding:26px clamp(20px,3vw,48px) 80px}
+.bar{display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between;padding-bottom:24px;border-bottom:1px solid var(--line)}
+.eyebrow{margin:0 0 4px;font-size:.69rem;font-weight:750;letter-spacing:.13em;text-transform:uppercase;color:var(--accent)}
+h1{margin:0;font-size:clamp(1.8rem,2.5vw,2.5rem);letter-spacing:-.045em;line-height:1.15}
+.lede{margin:6px 0 0;color:var(--muted);font-size:.88rem}
+.bar-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+#updated{font-size:.78rem;font-variant-numeric:tabular-nums}
+.status-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:22px 0 20px}
+.status-label{font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;font-weight:700;color:var(--muted);margin-right:4px}
+h2{font-size:1.12rem;line-height:1.3;letter-spacing:-.025em;margin:0 0 14px;font-weight:700}
+h3{font-size:.96rem;line-height:1.4;margin:0 0 10px;font-weight:650}
+.section-head{margin-bottom:16px}
+.section-head h2{font-size:1.38rem;margin:0 0 4px}
+.section-head p{margin:0;color:var(--muted);font-size:.85rem}
+.mono,.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.muted{color:var(--muted)}
+.pos{color:var(--good)} .neg{color:var(--bad)}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border:1px solid transparent;border-radius:999px;font-size:.75rem;font-weight:700;background:var(--soft);color:var(--muted);white-space:nowrap}
+.pill.good{background:var(--good-soft);color:var(--good)} .pill.warn{background:var(--warn-soft);color:var(--warn)}
+.pill.bad{background:var(--bad-soft);color:var(--bad)} .pill.info{background:var(--info-soft);color:var(--info)}
+.pill.accent{background:var(--accent-soft);color:var(--accent)}
+.dot{width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block}
+.panel,.kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 3px 18px rgba(15,35,48,.035);min-width:0}
+.panel{padding:24px}
+.grid{display:grid;gap:16px}
+.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.g3{grid-template-columns:repeat(auto-fit,minmax(min(100%,290px),1fr))}
+.kpis{display:grid;gap:12px;grid-template-columns:repeat(4,minmax(0,1fr))}
+.kpi{padding:18px 20px;min-height:136px;display:flex;flex-direction:column;justify-content:space-between}
+.kpi .l{font-size:.71rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:750}
+.kpi .v{font:650 clamp(1.2rem,1.6vw,1.75rem)/1.2 var(--mono);font-variant-numeric:tabular-nums;margin:6px 0;overflow-wrap:anywhere;letter-spacing:-.045em}
+.kpi .s{font-size:.74rem;line-height:1.45;color:var(--muted)}
+.kpi.hero{background:linear-gradient(135deg,#133d43,#102937 75%);border-color:#225d60;color:#f3fffd}
+.kpi.hero .l,.kpi.hero .s{color:#c2dcdb}
+.kpi.hero .v.pos{color:#91f0c6}.kpi.hero .v.neg{color:#ffb6b6}
+section{margin-top:28px;scroll-margin-top:24px}
+.note{position:relative;background:var(--accent-soft);border-color:var(--accent);box-shadow:none;padding:20px 24px 20px 28px}
+.note:before{content:"";position:absolute;inset:16px auto 16px 0;width:4px;background:var(--accent);border-radius:0 4px 4px 0}
+.note .eyebrow{margin-bottom:8px}
+.note p{margin:0;font-size:.99rem;max-width:85ch;font-weight:500}
+.note small{display:block;margin-top:8px;max-width:100ch;font-size:.76rem;line-height:1.5}
+.tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+.tab{border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:8px 14px;border-radius:8px;cursor:pointer;font:inherit;font-size:.82rem;min-height:44px}
+.tab[aria-selected="true"]{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:650}
+:is(a,button,summary,tr[tabindex]):focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.scroll{overflow-x:auto;scrollbar-color:var(--line) transparent}
+table{width:100%;border-collapse:collapse;font-size:.78rem;line-height:1.45}
+th{text-align:left;font-weight:700;color:var(--muted);font-size:.66rem;text-transform:uppercase;letter-spacing:.07em;padding:11px 12px;border-bottom:1px solid var(--line);white-space:nowrap;background:var(--soft)}
+th:first-child{border-radius:6px 0 0 0}th:last-child{border-radius:0 6px 0 0}
+td{padding:12px;border-bottom:1px solid var(--line);vertical-align:top}
+tbody tr:last-child td{border-bottom:0}
+td.num,th.num{text-align:right;white-space:nowrap}
+tr.click{cursor:pointer} tr.click:hover td{background:var(--soft)} tr.sel td{background:var(--accent-soft)}
+.reason{display:inline-block;margin:1px 4px 1px 0;padding:3px 8px;border-radius:5px;background:var(--soft);font-size:.72rem}
+.empty{padding:26px;text-align:center;color:var(--muted);background:var(--soft);border:1px dashed var(--line);border-radius:10px;font-size:.84rem}
+.funnel{padding:16px;border:1px solid var(--line);border-radius:10px;min-width:0}
+.funnel h3{min-height:44px}
+.funnel .row{display:grid;grid-template-columns:128px minmax(0,1fr) 46px;gap:8px;align-items:center;margin-block:9px;font-size:.76rem}
+.funnel .track,.blk .track{background:var(--soft);border-radius:99px;height:9px;overflow:hidden}
+.funnel .fill{height:100%;background:var(--accent);border-radius:99px;min-width:2px} .funnel .fill.end{background:var(--good)}
+.blk{display:grid;grid-template-columns:minmax(130px,42%) minmax(0,1fr) 34px;gap:8px;align-items:center;margin-block:12px;font-size:.8rem}
+.blk .fill{height:100%;background:var(--warn);border-radius:99px}
+.alert{display:grid;grid-template-columns:92px minmax(0,1fr);gap:8px;padding:11px 0;border-bottom:1px solid var(--line);font-size:.79rem}
+.alert:last-child{border-bottom:0}
+.sev-critical{color:var(--bad);font-weight:700} .sev-warning{color:var(--warn);font-weight:700}
+details summary{cursor:pointer;color:var(--accent);font-size:.78rem;padding:6px 0}
+.kv{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:8px 12px;font-size:.79rem}
+.kv dt{color:var(--muted)} .kv dd{margin:0;font-family:var(--mono);overflow-wrap:anywhere}
+.pnl .line{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--line);font-size:.82rem}
+.pnl .line.total{border-bottom:0;border-top:2px solid var(--line);font-weight:700;margin-top:4px;padding-top:10px}
+svg text{fill:var(--muted);font-size:10px;font-family:var(--mono)}
+.chart{width:100%;height:auto;display:block}
+.legend{display:flex;gap:14px;font-size:.74rem;color:var(--muted);margin-top:8px;flex-wrap:wrap}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.tl{list-style:none;margin:0;padding:0;font-size:.8rem}
+.tl li{display:grid;grid-template-columns:96px minmax(0,1fr);gap:8px;padding:9px 0;border-bottom:1px solid var(--line)}
+button.theme{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:9px 14px;min-height:44px;cursor:pointer;font:600 .82rem var(--sans);transition:background .18s,border-color .18s}
+button.theme:hover{background:var(--soft);border-color:var(--accent)}
+.phases{display:flex;height:34px;border-radius:7px;overflow:hidden;background:var(--soft);margin:6px 0 4px}
+.phases div{display:flex;align-items:center;justify-content:center;font-size:.74rem;font-weight:600;min-width:3px;white-space:nowrap;overflow:hidden}
+.ph-entry{background:var(--info-soft);color:var(--info)} .ph-hold{background:var(--good-soft);color:var(--good)} .ph-exit{background:var(--warn-soft);color:var(--warn)}
+.phase-legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;font-size:.78rem}
+.phase-legend b{display:block;font:650 .98rem var(--mono);color:var(--ink)}
+.bignum{font:700 2rem/1.15 var(--mono);font-variant-numeric:tabular-nums}
+.wide{grid-column:span 2}
+#detail{grid-template-columns:repeat(2,minmax(0,1fr))}
+.chart-grid{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr)}
+.chart-grid .wide{grid-column:auto}
+.steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:20px}
+.step{border:1px solid var(--line);border-radius:10px;padding:16px;background:var(--soft);min-width:0}
+.step b{display:block;font-size:.69rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
+.step span{font-size:.77rem;line-height:1.45}
+.step .n{font:700 1.14rem var(--mono);display:block;margin:8px 0;overflow-wrap:anywhere}
+.picks h3{margin:22px 0 10px}
+.why{font-size:.73rem;color:var(--warn)}
+.split-panel{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px;margin-top:24px;padding-top:24px;border-top:1px solid var(--line)}
+.split-panel>div{min-width:0}
+.split-panel h2{margin-bottom:14px}
+.panel-foot{display:block;margin-top:16px;font-size:.76rem;line-height:1.5}
+.entry-reason{margin-top:20px;padding-top:20px;border-top:1px solid var(--line);overflow-wrap:anywhere}
+.entry-reason p{font-size:.85rem;margin:10px 0}
+.entry-reason summary{min-height:44px;display:flex;align-items:center}
+@media (max-width:1250px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.steps{grid-template-columns:repeat(2,minmax(0,1fr))}.chart-grid{grid-template-columns:1fr}.chart-grid .wide{grid-column:auto}}
+@media (max-width:980px){.app-shell{display:block}.sidebar{padding:14px 20px;gap:12px}.sidebar-inner{position:static;gap:12px}.brand{padding:0}.nav-label,.sidebar-foot{display:none}.nav-links{display:flex;overflow-x:auto;gap:4px;scrollbar-width:thin}.nav-links a{white-space:nowrap;padding:8px 12px}.workspace{padding-top:24px}.g2,#detail{grid-template-columns:1fr}.wide{grid-column:auto}.split-panel{grid-template-columns:1fr}section{scroll-margin-top:16px}}
+@media (max-width:600px){.workspace{padding:20px 16px 56px}.bar{align-items:flex-start}.bar-actions{width:100%;justify-content:space-between}.status-row{margin:18px 0}.status-label{flex-basis:100%}.kpis{gap:8px}.kpi{padding:14px;min-height:130px}.kpi .v{font-size:1.15rem}.kpi .s{font-size:.7rem}.panel{padding:18px}.section-head h2{font-size:1.2rem}.steps{grid-template-columns:1fr 1fr}.step{padding:12px}.funnel .row{grid-template-columns:102px minmax(0,1fr) 40px}.blk{grid-template-columns:minmax(100px,45%) minmax(0,1fr) 28px}.kv{grid-template-columns:1fr}.kv dd{margin-bottom:4px}}
+@media (max-width:380px){.steps{grid-template-columns:1fr}.sidebar{padding-inline:12px}}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.nav-links a,button.theme{transition:none}}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to dashboard</a>
+<div class="app-shell">
+  <aside class="sidebar" aria-label="Dashboard navigation">
+    <div class="sidebar-inner">
+      <a class="brand" href="#overview"><span class="brand-mark" aria-hidden="true"></span><span>Arbitrage<small>Bot console</small></span></a>
+      <nav aria-label="Sections">
+        <span class="nav-label">Workspace</span>
+        <div class="nav-links">
+          <a href="#overview"><span class="nav-index" aria-hidden="true">00</span>Overview</a>
+          <a href="#performance"><span class="nav-index" aria-hidden="true">01</span>Performance</a>
+          <a href="#trades-section"><span class="nav-index" aria-hidden="true">02</span>Trades</a>
+          <a href="#plan"><span class="nav-index" aria-hidden="true">03</span>The plan</a>
+          <a href="#scanner"><span class="nav-index" aria-hidden="true">04</span>Scanner</a>
+          <a href="#market"><span class="nav-index" aria-hidden="true">05</span>Market pairs</a>
+          <a href="#decisions-section"><span class="nav-index" aria-hidden="true">06</span>Decisions</a>
+          <a href="#settings-section"><span class="nav-index" aria-hidden="true">07</span>Settings</a>
+        </div>
+      </nav>
+    </div>
+    <div class="sidebar-foot"><small>Workspace</small>Read-only monitoring · paper mode</div>
+  </aside>
+  <main class="workspace" id="main">
+    <header class="bar" id="overview">
+      <div><p class="eyebrow">Operations / Dashboard</p><h1>Trading overview</h1><p class="lede">A clear view of performance, activity, and what the bot is checking.</p></div>
+      <div class="bar-actions"><span class="muted" id="updated">loading…</span><button class="theme" id="theme" type="button" aria-label="Switch colour theme">Change theme</button></div>
+    </header>
+    <div class="status-row" aria-label="Bot status">
+      <span class="status-label">Bot status</span>
+      <span class="pill accent" id="mode">…</span>
+      <span class="pill good" id="live">Live trading OFF</span>
+      <span class="pill" id="kill">…</span>
+      <span class="pill" id="health">…</span>
+    </div>
+    <div class="kpis" id="kpis"></div>
+
+    <section class="panel note" aria-live="polite">
+      <p class="eyebrow">At a glance</p>
+      <p id="narrative">Loading…</p>
+      <small class="muted" id="narrative-sub"></small>
+    </section>
+
+    <section id="performance">
+      <div class="section-head"><p class="eyebrow">01 / Performance</p><h2>How the strategy is doing</h2><p>Track net results and see how funding, price changes, and fees contribute.</p></div>
+      <div class="grid chart-grid">
+        <div class="panel wide"><h3>Net profit over time (all trades)</h3><div id="cum-chart"></div></div>
+        <div class="panel"><h3>Where the profit comes from, per trade</h3><div id="bar-chart"></div></div>
+      </div>
+    </section>
+
+    <section class="panel" id="trades-section">
+      <div class="section-head"><p class="eyebrow">02 / Positions</p><h2>Trades</h2><p>Select a trade to see its timeline, profit breakdown, and orders below.</p></div>
+      <div class="scroll"><table id="trades"></table></div>
+    </section>
+
+    <section id="detail" class="grid" hidden></section>
+
+    <section class="panel" id="plan">
+      <div class="section-head"><p class="eyebrow">03 / Strategy</p><h2>The plan: identify, select, simulate, then verify and trade</h2><p>From the market-wide sweep to a position that passes every live check.</p></div>
+      <div class="steps" id="steps"></div>
+      <div id="picks"></div>
+      <div id="sim-chart" style="margin-top:24px"></div>
+      <small class="muted panel-foot" id="plan-note"></small>
+    </section>
+
+    <section class="panel" id="scanner">
+      <div class="section-head"><p class="eyebrow">04 / Discovery</p><h2>Scanner activity</h2><p>What the bot swept, what passed, and why a pair may have been rejected.</p></div>
+      <div class="grid g3" id="funnels"></div>
+      <div class="split-panel">
+        <div><h2>Why nothing was traded</h2><div id="blockers"></div><small class="muted panel-foot" id="blockers-note"></small></div>
+        <div><h2>Alerts</h2><div id="alerts" style="max-height:260px;overflow:auto"></div></div>
+      </div>
+    </section>
+
+    <section class="panel" id="market">
+      <div class="section-head"><p class="eyebrow">05 / Market watch</p><h2>Best funding pairs across every coin Zero Delta lists (last 7 days)</h2><p>Compare the strongest funding spreads from the latest sweep.</p></div>
+      <div class="tabs" id="opp-tabs" role="tablist"></div>
+      <div class="scroll"><table id="opp"></table></div>
+      <small class="muted panel-foot">Top 60 pairs from the latest sweep, best first. Rates are annualised (APR). "Tradable" means both venues have a working adapter and are different exchanges. The bot still has to pass every live check before it enters.</small>
+    </section>
+
+    <section class="panel" id="decisions-section">
+      <div class="section-head"><p class="eyebrow">06 / Activity log</p><h2>Recent decisions</h2><p>Review the checks behind each entry, wait, or rejection.</p></div>
+      <div class="scroll"><table id="decisions"></table></div>
+    </section>
+
+    <section class="panel" id="settings-section">
+      <div class="section-head"><p class="eyebrow">07 / Configuration</p><h2>Settings in use</h2><p>Current limits and paper-mode defaults used by the bot.</p></div>
+      <div id="settings"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = (n, d = 2) => n == null || isNaN(n) ? "n/a" : Number(n).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
+const money = (n, d = 2) => (n == null || isNaN(n)) ? "n/a" : (Number(fmt(Math.abs(n), d)) === 0 ? "" : n < 0 ? "-" : "") + "$" + fmt(Math.abs(n), d);
+const signMoney = (n, d = 2) => (n == null || isNaN(n)) ? "n/a" : (Number(fmt(Math.abs(n), d)) === 0 ? "$" + fmt(0, d) : (n < 0 ? "-" : "+") + "$" + fmt(Math.abs(n), d));
+const cls = n => n == null || isNaN(n) || Math.abs(n) < 0.005 ? "" : n > 0 ? "pos" : "neg";
+const time = iso => iso ? new Date(iso).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}) : "n/a";
+const dt = iso => iso ? new Date(iso).toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "n/a";
+let serverNow = null;  // the bot's own clock: "x ago" must not depend on the browser's clock
+const ago = iso => { if (!iso) return "never"; const s = Math.max(0, ((serverNow ? new Date(serverNow) : Date.now()) - new Date(iso)) / 1000);
+  return s < 90 ? Math.round(s) + "s ago" : s < 5400 ? Math.round(s / 60) + " min ago" : Math.round(s / 3600) + " h ago"; };
+const dur = s => s == null ? "n/a" : s < 90 ? Math.round(s) + " s" : s < 5400 ? Math.round(s / 60) + " min" : s < 172800 ? (s / 3600).toFixed(1) + " h" : (s / 86400).toFixed(1) + " days";
+
+const STATE = {
+  ENTERING: ["info", "Opening"], HEDGED_OPEN: ["good", "Holding (hedged)"], EXITING: ["warn", "Closing"],
+  EXIT_PENDING: ["warn", "Exit pending"], CONTROLLED_EXIT: ["warn", "Controlled exit (30%)"],
+  EMERGENCY_EXIT: ["bad", "Emergency exit"], CLOSED: ["", "Closed"], DEGRADED: ["bad", "Degraded"],
+  RECONCILING: ["warn", "Reconciling"], ERROR: ["bad", "Error"], MANUAL_INTERVENTION_REQUIRED: ["bad", "Needs a human"],
+  REJECTED: ["", "Rejected"], DISCOVERED: ["", "Discovered"]
+};
+const stateChip = s => { const [c, t] = STATE[s] || ["", s]; return `<span class="pill ${c}">${esc(t)}</span>`; };
+const OUTCOME = {ENTER: ["good", "Passed all checks"], ENTERED: ["good", "Trade opened"], WAIT: ["warn", "Wait"],
+  REJECT: ["", "Rejected"], EXCHANGE_MISMATCH: ["bad", "Data mismatch"], SHADOW_ENTERED: ["warn", "Shadow research opened"]};
+const outChip = o => { const [c, t] = OUTCOME[o] || ["", o]; return `<span class="pill ${c}">${esc(t)}</span>`; };
+
+let selectedAsset = null, selectedTrade = null, data = {};
+
+/* ---------- charts (plain SVG, no libraries) ---------- */
+const niceStep = raw => { const mag = Math.pow(10, Math.floor(Math.log10(raw))); return [1, 2, 2.5, 5, 10].map(m => m * mag).find(v => v >= raw); };
+
+/* series: [{name,color,points:[{t:ms,v}], fill?:bool}]  opts: {label, min, lines:[{at,color,label}], fmt(v,span)} */
+function timeChart(series, opts) {
+  const W = 620, H = 210, L = 56, R = 12, T = 12, B = 26;
+  const all = series.flatMap(s => s.points.filter(p => p.v != null));
+  if (!all.length) return `<div class="empty">${esc(opts.empty || "No data yet")}</div>`;
+  let tmin = Math.min(...all.map(p => p.t)), tmax = Math.max(...all.map(p => p.t));
+  if (tmax === tmin) { tmin -= 30000; tmax += 30000; }
+  let lo = opts.min ?? Math.min(...all.map(p => p.v)), hi = opts.max ?? Math.max(...all.map(p => p.v));
+  (opts.lines || []).forEach(l => { lo = Math.min(lo, l.at); hi = Math.max(hi, l.at); });
+  if (hi === lo) { hi += 1; lo -= 1; }
+  const pad = (hi - lo) * 0.1;
+  if (opts.min == null) lo -= pad;
+  hi += pad;
+  const x = t => L + (t - tmin) * (W - L - R) / (tmax - tmin), y = v => T + (hi - v) * (H - T - B) / (hi - lo);
+  const step = niceStep((hi - lo) / 4);
+  let g = "";
+  for (let v = Math.ceil(lo / step - 1e-9) * step; v <= hi + 1e-9; v += step)
+    g += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--soft)"/><text x="${L - 6}" y="${y(v) + 3}" text-anchor="end">${opts.fmt ? opts.fmt(v, hi - lo) : fmt(v, 0)}</text>`;
+  for (let k = 0; k <= 3; k++) {
+    const t = tmin + (tmax - tmin) * k / 3, anchor = k === 0 ? "start" : k === 3 ? "end" : "middle";
+    g += `<text x="${x(t)}" y="${H - 8}" text-anchor="${anchor}">${new Date(t).toLocaleString([], (tmax - tmin) > 86400000 ? {month: "short", day: "numeric", hour: "2-digit"} : {hour: "2-digit", minute: "2-digit"})}</text>`;
+  }
+  (opts.lines || []).forEach(l => {
+    g += `<line x1="${L}" x2="${W - R}" y1="${y(l.at)}" y2="${y(l.at)}" stroke="${l.color}" stroke-dasharray="4 3"/><text x="${W - R}" y="${y(l.at) - 3}" text-anchor="end" style="fill:${l.color}">${esc(l.label)}</text>`;
+  });
+  series.forEach(s => {
+    const pts = s.points.filter(p => p.v != null);
+    if (!pts.length) return;
+    const d = pts.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
+    const base = y(Math.max(lo, Math.min(0, hi)));
+    if (s.fill && pts.length > 1) g += `<path d="${d} L${x(pts[pts.length - 1].t).toFixed(1)},${base} L${x(pts[0].t).toFixed(1)},${base} Z" fill="${s.color}" opacity="0.12"/>`;
+    g += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round"/>`;
+    const last = pts[pts.length - 1];
+    g += `<circle cx="${x(last.t)}" cy="${y(last.v)}" r="3.5" fill="${s.color}"/>`;
+  });
+  const legend = series.length > 1 ? `<div class="legend">${series.map(s => `<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join("")}</div>` : "";
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(opts.label)}">${g}</svg>${legend}`;
+}
+
+/* stacked bars per trade: funding, price moves and fees, with a marker for the net result */
+function barChart(items) {
+  if (!items.length) return `<div class="empty">No trades yet. Bars appear as soon as a trade has a result.</div>`;
+  items = items.slice(-12);
+  const W = 460, H = 230, L = 50, R = 8, T = 12, B = 34;
+  const parts = i => { const up = [], down = [];
+    (i.funding >= 0 ? up : down).push(["funding", i.funding]); (i.price >= 0 ? up : down).push(["price", i.price]); down.push(["fees", -i.fees]);
+    return {up, down}; };
+  const tops = items.map(i => parts(i).up.reduce((a, [, v]) => a + v, 0)), bots = items.map(i => parts(i).down.reduce((a, [, v]) => a + v, 0));
+  let hi = Math.max(0.01, ...tops), lo = Math.min(-0.01, ...bots);
+  const span = hi - lo; hi += span * 0.08; lo -= span * 0.08;
+  const y = v => T + (hi - v) * (H - T - B) / (hi - lo), gap = (W - L - R) / items.length, bw = Math.min(46, gap * 0.62);
+  const color = {funding: "var(--good)", price: "var(--info)", fees: "var(--bad)"};
+  let g = "";
+  const step = niceStep((hi - lo) / 4);
+  for (let v = Math.ceil(lo / step - 1e-9) * step; v <= hi + 1e-9; v += step)
+    g += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="${Math.abs(v) < 1e-9 ? "var(--muted)" : "var(--soft)"}"/><text x="${L - 6}" y="${y(v) + 3}" text-anchor="end">${money(v, span < 5 ? 2 : 0) || "$0"}</text>`;
+  items.forEach((it, k) => {
+    const cx = L + gap * k + gap / 2, p = parts(it); let up = 0, down = 0;
+    p.up.forEach(([name, v]) => { g += `<rect x="${cx - bw / 2}" y="${y(up + v)}" width="${bw}" height="${Math.max(1, y(up) - y(up + v))}" fill="${color[name]}" rx="2"><title>${name}: ${signMoney(v)}</title></rect>`; up += v; });
+    p.down.forEach(([name, v]) => { g += `<rect x="${cx - bw / 2}" y="${y(down)}" width="${bw}" height="${Math.max(1, y(down + v) - y(down))}" fill="${color[name]}" rx="2"><title>${name}: ${signMoney(v)}</title></rect>`; down += v; });
+    g += `<line x1="${cx - bw / 2 - 4}" x2="${cx + bw / 2 + 4}" y1="${y(it.net)}" y2="${y(it.net)}" stroke="var(--ink)" stroke-width="2.5"><title>net: ${signMoney(it.net)}</title></line>`;
+    g += `<text x="${cx}" y="${H - 16}" text-anchor="middle">${esc(it.id.replace("arb", "#"))}</text>${it.live ? `<text x="${cx}" y="${H - 5}" text-anchor="middle">open</text>` : ""}`;
+  });
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Profit per trade split into funding, price moves and fees">${g}</svg>
+    <div class="legend"><span><i style="background:var(--good)"></i>Funding earned</span><span><i style="background:var(--info)"></i>Price moves</span><span><i style="background:var(--bad)"></i>Fees</span><span><i style="background:var(--ink);height:3px"></i>Net result</span></div>`;
+}
+
+/* ---------- top of the page ---------- */
+function renderTop(o) {
+  serverNow = o.now;
+  $("mode").textContent = o.mode.toUpperCase() + " MODE";
+  const k = o.kill_switch, kill = $("kill");
+  if (k.emergency_flatten) { kill.className = "pill bad"; kill.textContent = "EMERGENCY FLATTEN ON"; }
+  else if (k.pause_new_entries) { kill.className = "pill warn"; kill.textContent = "New entries paused"; }
+  else if (o.blocked_reason) { kill.className = "pill bad"; kill.textContent = "New trades blocked"; kill.title = o.blocked_reason; }
+  else { kill.className = "pill good"; kill.textContent = "Scanning enabled"; }
+  const comps = Object.entries(o.health), bad = comps.filter(([, c]) => !c.ok), h = $("health");
+  h.className = "pill " + (bad.length ? "bad" : "good");
+  h.innerHTML = `<span class="dot"></span> ${bad.length ? bad.map(([n]) => esc(n)).join(", ") + " has a problem" : "All systems ok"}`;
+  h.title = comps.map(([n, c]) => `${n}: ${c.ok ? "ok" : "PROBLEM"} (${c.detail || "-"}, ${Math.round(c.age_seconds)}s ago)`).join("\n");
+  $("updated").textContent = "Updated " + time(o.now) + " · up " + dur(o.uptime_seconds);
+}
+
+function renderKpis(p) {
+  const s = p.summary, none = !s.closed_trades && !s.open_trades;
+  const tile = (label, value, sub, klass = "", hero = false) => `<div class="kpi ${hero ? "hero" : ""}"><div class="l">${label}</div><div class="v ${klass}">${value}</div><div class="s">${sub}</div></div>`;
+  $("kpis").innerHTML = [
+    tile("Paper net profit (combined)", signMoney(s.net_pnl_total), none ? "no trades yet" : `gated ${signMoney(s.standard_net_pnl)} · shadow ${signMoney(s.shadow_net_pnl)}`, cls(s.net_pnl_total), true),
+    tile("Funding earned", signMoney(s.funding_total), "the payments the bot is here to collect", cls(s.funding_total)),
+    tile("Fees paid", s.fees_total ? "-" + money(s.fees_total) : "$0.00", "entry and exit, both legs", s.fees_total ? "neg" : ""),
+    tile("Price moves", signMoney(s.price_pnl_total), "should stay near zero (hedged)", cls(s.price_pnl_total)),
+    tile("Trades", `${s.closed_trades} closed · ${s.open_trades} open`, s.win_rate == null ? "win rate after the first close" : `${fmt(s.win_rate * 100, 0)}% profitable (${s.wins} won, ${s.losses} lost)`),
+    tile("Time to enter", s.avg_entry_seconds == null ? "n/a" : dur(s.avg_entry_seconds), "average, first order to fully hedged"),
+    tile("Time held", s.avg_hold_seconds == null ? "n/a" : dur(s.avg_hold_seconds), s.avg_exit_seconds == null ? "average" : `average · exit takes ${dur(s.avg_exit_seconds)}`),
+    tile("Money at work", money(s.exposure_open_usd, 0) || "$0", s.return_on_notional_pct == null ? "both legs, open trades" : `return on closed trades: ${fmt(s.return_on_notional_pct, 2)}%`)
+  ].join("");
+}
+
+function renderNarrative(o) {
+  const sw = o.sweep || {}, pr = sw.progress || {}, parts = [];
+  const scans = Object.values(o.scans);
+  if (pr.running) parts.push(`<b>Sweeping Zero Delta now:</b> ${pr.done} of ${pr.total} coins done.`);
+  if (!sw.assets_total && !pr.running) parts.push("The bot has just started and has not finished its first sweep yet.");
+  else if (sw.assets_total) {
+    const zdBad = sw.assets_scanned === 0 || sw.aborted === "auth" || sw.aborted === "rate_limit";
+    if (zdBad) parts.push("Zero Delta is not responding, so the bot is <b>not looking for new trades</b>. Anything already open keeps being managed.");
+    else parts.push(`${pr.running ? "Previous sweep" : "Last sweep"} ${ago(sw.finished_at)}: read ${sw.assets_scanned} of ${sw.assets_total} coins from Zero Delta, ${fmt(sw.pairs_total, 0)} possible pairs, ${sw.tradable_pairs} of them tradable by this bot, ${sw.verified} double-checked on the exchanges.`);
+    if (sw.aborted === "rate_limit") parts.push("It stopped early because Zero Delta asked it to slow down.");
+    else if (sw.aborted === "outage") parts.push("It stopped early after repeated Zero Delta errors.");
+    if (o.open_trades) parts.push(`<b>${o.open_trades} trade${o.open_trades === 1 ? " is" : "s are"} open.</b>`);
+    else if (!zdBad) { const top = o.top_blockers[0];
+      parts.push(sw.passed ? "Some pairs passed the checks." : "<b>Nothing passed the safety checks, so the bot is not trading.</b>" + (top ? ` Most common reason: ${esc(top.plain.toLowerCase())}.` : "")); }
+  }
+  if (o.kill_switch.emergency_flatten) parts.push("<b>Emergency flatten is on:</b> everything is being closed.");
+  else if (o.kill_switch.pause_new_entries) parts.push("New entries are paused.");
+  $("narrative").innerHTML = parts.join(" ");
+  $("narrative-sub").textContent = `Paper mode: real prices, simulated money, no real orders. A full sweep of every coin repeats ${dur(o.scan_interval_seconds)} after the last one ends. Waiting is normal: most of the time no pair is worth the fees.`;
+}
+
+function renderCharts(p) {
+  $("cum-chart").innerHTML = timeChart([{name: "Net profit", color: "var(--accent)", fill: true, points: p.cumulative.map(a => ({t: new Date(a.at).getTime(), v: a.pnl}))}],
+    {label: "Cumulative net profit", fmt: (v, span) => signMoney(v, span < 5 ? 2 : 0), lines: [{at: 0, color: "var(--muted)", label: "break-even"}],
+     empty: "No results yet. The line starts when the first trade closes (or shows the open trade's profit so far)."});
+  $("bar-chart").innerHTML = barChart(p.per_trade);
+}
+
+function renderTrades(list) {
+  if (!list.length) { $("trades").innerHTML = `<tr><td><div class="empty">No trades yet. The bot opens one only when a pair passes every safety check. See "Scanner" below for what it is looking at.</div></td></tr>`; return; }
+  $("trades").innerHTML = `<thead><tr><th>Trade</th><th>Pair (long → short)</th><th>State</th><th>Entered</th><th class="num">Time to enter</th><th class="num">Held</th><th class="num">Exit took</th><th class="num">Funding</th><th class="num">Fees</th><th class="num">Net profit</th><th class="num">Return</th><th>Ended because</th></tr></thead><tbody>` +
+    list.map(t => { const m = t.money, tm = t.timing;
+      return `<tr class="click ${t.id === selectedTrade ? "sel" : ""}" tabindex="0" data-id="${esc(t.id)}"><td class="mono">${esc(t.id)}<br><span class="muted">${esc(t.asset)} · ${t.shadow ? "shadow research" : "gated paper"}</span></td><td>${esc(t.long)} → ${esc(t.short)}</td><td>${stateChip(t.state)}</td><td>${dt(tm.entry_started_at)}</td>
+        <td class="num">${dur(tm.entry_seconds)}${tm.entry_done ? "" : " …"}</td><td class="num">${dur(tm.hold_seconds)}</td><td class="num">${dur(tm.exit_seconds)}</td>
+        <td class="num ${cls(m.funding)}">${signMoney(m.funding)}</td><td class="num">${m.fees == null ? "n/a" : "-" + (money(m.fees) || "$0.00")}</td>
+        <td class="num ${cls(m.net)}"><b>${signMoney(m.net)}</b>${m.live ? `<br><span class="muted">so far</span>` : ""}</td><td class="num ${cls(t.return_pct)}">${t.return_pct == null ? "n/a" : fmt(t.return_pct, 2) + "%"}</td><td class="muted">${esc(t.exit_reason || "")}</td></tr>`; }).join("") + `</tbody>`;
+  document.querySelectorAll("#trades tr.click").forEach(r => {
+    const open = () => { selectedTrade = r.dataset.id; loadDetail(); renderTrades(data.trades); };
+    r.onclick = open; r.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
+  });
+}
+
+/* ---------- one trade in detail ---------- */
+function entryReason(d, expanded = false) {
+  const decision = d.decision || {}, checks = decision.checks || [], m = decision.metrics || {}, s = d.entry_snapshot || {};
+  const waived = checks.filter(c => !c.passed && c.blocking === "info"), blocked = checks.filter(c => !c.passed && c.blocking !== "info");
+  const labels = {expected_net_edge: "Expected edge after fees and slippage", low_vol_score: "Volatility score",
+    negative_spread_within_2h_funding: "Entry spread covered by 2 hours of funding", net_funding_positive_over_2h: "Positive net funding",
+    legs_track_same_underlying: "Prices track the same underlying", legs_can_be_sized_equally: "Equal quantity on both legs"};
+  const label = c => labels[c.name] || c.name.replaceAll("_", " ");
+  let reason = "The original entry checks were not saved, so the exact admission reason is unavailable.";
+  if (checks.length) {
+    if (d.shadow) reason = "Opened as a shadow research trial to observe this pair with simulated money. " +
+      (waived.length ? `The normal requirements for ${waived.map(label).join(", ").toLowerCase()} were not met and were treated as research-only overrides. ` : "Shadow mode can bypass the normal net-edge and portfolio gates. ") +
+      (blocked.length ? "Some saved checks did not pass; inspect the recorded checks below." : "The remaining recorded entry checks passed.");
+    else reason = blocked.length || waived.length ? "Opened as a gated paper trade; inspect the recorded checks below for exceptions." : "Opened as a gated paper trade because all recorded entry checks passed.";
+  }
+  const metric = (label, value) => `<dt>${label}</dt><dd>${value}</dd>`;
+  const netRate = m.net_funding_per_hour == null ? null : Number(m.net_funding_per_hour);
+  const funding = (s.funding || []).map(f => {
+    const effect = f.rate_pct == null ? "" : Number(f.rate_pct) === 0 ? "no payment" : (f.leg === "long") === (Number(f.rate_pct) > 0) ? "pay" : "receive";
+    return metric(`${f.leg === "long" ? "Long" : "Short"} on ${esc(f.venue)}`, f.rate_pct == null ? "not recorded" : `${Number(f.rate_pct) > 0 ? "+" : ""}${fmt(f.rate_pct, 4)}% / ${fmt(f.interval_hours, 0)} h · ${effect}`);
+  }).join("");
+  const crossChecked = ["long", "short"].every(role => checks.some(c => c.name === role + "_funding_rate_matches" && c.passed));
+  return `<div class="entry-reason"><h2>Why this trade opened</h2>
+    <span class="pill ${d.shadow ? "warn" : "info"}">${d.shadow ? waived.some(c => c.name === "expected_net_edge") ? "Shadow research · profitability gate bypassed" : "Shadow research trial" : "Gated paper trade"}</span>
+    <p>${esc(reason)}</p>
+    <small class="muted">Recorded at admission: ${dt(d.opened_at)}. These are entry-time values, not current rates.</small>
+    <dl class="kv">
+      ${metric("Net funding spread at entry", netRate == null ? "not recorded" : `${fmt(netRate * 100, 6)}% / h · ${fmt(netRate * 100 * 8760, 2)}% APR before costs`)}
+      ${metric("Expected edge after costs", m.expected_net_edge_bps == null ? "not recorded" : `${fmt(m.expected_net_edge_bps, 2)} bps${s.min_expected_net_edge_bps == null ? "" : ` · normal minimum ${fmt(s.min_expected_net_edge_bps, 2)} bps`}`)}
+      ${metric("Cost calculation assumes", s.expected_hold_hours == null ? "not recorded" : `${fmt(s.expected_hold_hours, 0)} h holding time · fees/slippage are paper assumptions`)}
+      ${metric("Volatility at entry", m.low_vol_score == null ? "not recorded" : `${fmt(m.low_vol_score, 2)}${s.low_vol_max_percentile == null ? "" : ` / maximum ${fmt(s.low_vol_max_percentile, 0)}`}`)}
+      ${metric("Executable entry spread", m.entry_spread_pct == null ? "not recorded" : `${fmt(m.entry_spread_pct, 4)}%`)}
+      ${s.mean_funding_apr_pct == null ? "" : metric("7-day average funding spread", `${fmt(s.mean_funding_apr_pct, 2)}% APR${s.selection_metric === "mean" ? " · selection metric" : ""}`)}
+      ${s.twap_entry_duration_minutes == null ? "" : metric("Entry plan", `${fmt(s.twap_entry_duration_minutes / 60, 0)} h TWAP · ${d.entry_plan?.slices ?? "n/a"} slices per leg`)}
+    </dl>
+    ${funding ? `<h3>Saved discovery funding</h3><dl class="kv">${funding}</dl><small class="muted">Zero Delta snapshot${s.funding_as_of ? " as of " + dt(s.funding_as_of) : ""}${crossChecked ? "; both rates passed the direct-venue cross-check before admission" : ""}. Future settlements may differ.</small>` : ""}
+    <details id="entry-checks"${expanded ? " open" : ""}><summary>View all ${checks.length} recorded entry checks</summary>
+      ${checks.length ? `<dl class="kv">${checks.map(c => `<dt>${esc(label(c))}</dt><dd><b class="${c.passed ? "pos" : c.blocking === "info" ? "why" : "neg"}">${c.passed ? "Passed" : c.blocking === "info" ? "Research-only override" : "Did not pass"}</b><br>${esc(c.value)}<br><span class="muted">Requirement: ${esc(c.limit)}</span></dd>`).join("")}</dl>` : `<p class="muted">No original checks recorded.</p>`}
+    </details></div>`;
+}
+
+async function loadDetail() {
+  if (!selectedTrade) return;
+  let d;
+  try { d = await get("/api/trades/" + encodeURIComponent(selectedTrade)); } catch { return; }
+  const box = $("detail"); box.hidden = false;
+  const tm = d.timing, tot = Math.max(1, (tm.entry_seconds || 0) + (tm.hold_seconds || 0) + (tm.exit_seconds || 0));
+  const seg = (klass, label, s) => s ? `<div class="${klass}" style="width:${Math.max(4, s / tot * 100)}%" title="${label}: ${dur(s)}">${s / tot > 0.12 ? label : ""}</div>` : "";
+  const pr = d.prices, px = x => x ? `$${fmt(x.avg_price, 2)}` : "n/a";
+  const tp = (arr, tk, vk) => arr.filter(a => a[vk] != null).map(a => ({t: new Date(a[tk]).getTime(), v: a[vk]}));
+  const ratio = timeChart([
+      {name: "Long account", color: "var(--info)", points: tp(d.equity.map(e => ({at: e.at, v: e.long_ratio == null ? null : e.long_ratio * 100})), "at", "v")},
+      {name: "Short account", color: "var(--warn)", points: tp(d.equity.map(e => ({at: e.at, v: e.short_ratio == null ? null : e.short_ratio * 100})), "at", "v")}],
+    {label: "Account balance versus starting balance", min: 0, fmt: v => fmt(v, 0) + "%", lines: [
+      {at: 30, color: "var(--warn)", label: "30% slow exit"}, {at: 10, color: "var(--bad)", label: "10% emergency"}, {at: 100, color: "var(--muted)", label: "start"}]});
+  const exposure = timeChart([{name: "Long minus short", color: "var(--accent)", points: tp(d.equity, "at", "net_delta_usd")}],
+    {label: "Net exposure", fmt: (v, s) => (v < 0 ? "-$" : "$") + fmt(Math.abs(v), s < 5 ? 2 : 0), lines: [{at: 0, color: "var(--muted)", label: "balanced"}]});
+  const profit = timeChart([{name: "Net profit", color: "var(--accent)", fill: true, points: tp(d.pnl_series, "at", "pnl")}],
+    {label: "Net profit of this trade over time", fmt: (v, s) => signMoney(v, s < 5 ? 2 : 0), lines: [{at: 0, color: "var(--muted)", label: "break-even"}], empty: "Waiting for the first readings."});
+  const funding = timeChart([{name: "Funding", color: "var(--good)", fill: true, points: tp(d.funding_cumulative, "at", "total")}],
+    {label: "Funding collected", min: 0, fmt: (v, s) => "$" + fmt(v, s < 5 ? 2 : 0), empty: "No funding settled yet. It pays every few hours."});
+  const filled = d.slices.filter(s => s.phase === "entry").length, planned = d.entry_plan ? d.entry_plan.slices : filled;
+  const mm = d.money;
+  const lines = [["Funding earned", mm.funding], ["Price moves of the two legs", mm.price], ["Fees paid", mm.fees == null ? null : -mm.fees]];
+  const entryExpanded = box.dataset.trade === d.id && !!$("entry-checks")?.open;
+  box.dataset.trade = d.id;
+  box.innerHTML = `
+    <div class="panel"><h2>${esc(d.id)} · ${esc(d.asset)} · ${esc(d.long)} → ${esc(d.short)}</h2>
+      <div class="bignum ${cls(mm.net)}">${signMoney(mm.net)}</div>
+      <div class="muted" style="margin-bottom:8px">${mm.live ? "profit so far (if closed at today's prices, before closing costs)" : "final net profit"} · ${stateChip(d.state)}</div>
+      <div class="pnl">${lines.map(([k, v]) => `<div class="line"><span>${k}</span><span class="num ${cls(v)}">${signMoney(v)}</span></div>`).join("")}
+        <div class="line total"><span>Net profit</span><span class="num ${cls(mm.net)}">${signMoney(mm.net)}</span></div></div>
+      <small class="muted">Slippage (${money(mm.slippage) || "$0.00"} estimate) is already inside the price line.${d.exit ? ` Closed by: ${esc(d.exit.mode)} exit, ${esc(d.exit.reason)}.` : ""}</small>
+      ${entryReason(d, entryExpanded)}
+      <h2 style="margin-top:14px">Timing</h2>
+      <div class="phases">${seg("ph-entry", "Entering", tm.entry_seconds)}${seg("ph-hold", "Holding", tm.hold_seconds)}${seg("ph-exit", "Exiting", tm.exit_seconds)}</div>
+      <div class="phase-legend">
+        <div class="muted">Entering<b>${dur(tm.entry_seconds)}</b>${dt(tm.entry_started_at)} → ${tm.hedged_at ? dt(tm.hedged_at) : "…"}</div>
+        <div class="muted">Holding<b>${dur(tm.hold_seconds)}</b>${tm.hedged_at ? "since " + dt(tm.hedged_at) : "not yet"}</div>
+        <div class="muted">Exiting<b>${dur(tm.exit_seconds)}</b>${tm.exit_started_at ? dt(tm.exit_started_at) + (tm.closed_at ? " → " + dt(tm.closed_at) : "") : "not yet"}</div></div>
+      <div class="muted" style="font-size:.8rem;margin:10px 0 4px">Entry progress: ${filled} of ${planned} slices of $${fmt(d.entry_plan ? d.entry_plan.child : 0, 0)} per side</div>
+      <div class="phases" style="height:10px"><div style="width:${planned ? Math.min(100, filled / planned * 100) : 0}%;background:var(--accent)"></div></div>
+      <h2 style="margin-top:14px">Prices</h2>
+      <dl class="kv"><dt>Long bought at (avg)</dt><dd>${px(pr.long_entry)}</dd><dt>Short sold at (avg)</dt><dd>${px(pr.short_entry)}</dd>
+        <dt>Long closed at</dt><dd>${px(pr.long_exit)}</dd><dt>Short closed at</dt><dd>${px(pr.short_exit)}</dd>
+        <dt>Size per side</dt><dd>${money(d.target_per_leg_usd, 0)} at ${d.leverage}x</dd></dl>
+    </div>
+    <div class="panel wide"><h2>Net profit of this trade over time</h2>${profit}
+      <h2 style="margin-top:14px">Funding collected</h2>${funding}</div>
+    <div class="panel wide"><h2>Each account's balance vs its starting balance (safety)</h2>${ratio}
+      <h2 style="margin-top:14px">Long vs short exposure (should stay near zero)</h2>${exposure}</div>
+    <div class="panel"><h2>What happened, in order</h2><ul class="tl">${d.timeline.map(t => `<li><span class="muted num" style="white-space:nowrap">${time(t.at)}</span><span>${t.kind === "state_transition" ? `${esc(t.detail.from)} → <b>${esc(t.detail.to)}</b> <span class="muted">${esc(t.detail.reason || "")}</span>` : esc(t.kind)}</span></li>`).join("") || `<li><span></span><span class="muted">no events</span></li>`}</ul>
+      ${d.risk_events.length ? `<h2 style="margin-top:14px">Risk events</h2><ul class="tl">${d.risk_events.map(r => `<li><span class="muted num" style="white-space:nowrap">${time(r.at)}</span><span><b>${esc(r.action)}</b> <span class="muted">${r.reasons.map(esc).join(", ")}</span></span></li>`).join("")}</ul>` : ""}</div>
+    <div class="panel wide"><h2>Orders (${d.orders.length})</h2><div class="scroll" style="max-height:320px;overflow:auto"><table><thead><tr><th>Time</th><th>Leg</th><th>Side</th><th class="num">Size</th><th class="num">Price</th><th class="num">Fee</th></tr></thead><tbody>${d.orders.map(o => `<tr><td class="muted num">${time(o.at)}</td><td>${esc(o.leg)}${o.reduce_only ? " <span class='muted'>(close)</span>" : ""}</td><td>${esc(o.side)}</td><td class="num">${fmt(o.qty, 4)}</td><td class="num">${fmt(o.price, 2)}</td><td class="num">${fmt(o.fee_usd, 4)}</td></tr>`).join("")}</tbody></table></div>
+      ${d.funding.length ? `<h2 style="margin-top:14px">Funding payments</h2><div class="scroll"><table><tbody>${d.funding.slice(-8).map(f => `<tr><td class="muted">${dt(f.at)}</td><td>${esc(f.venue)}</td><td class="num ${cls(f.payment_usd)}">${signMoney(f.payment_usd, 4)}</td></tr>`).join("")}</tbody></table></div>` : ""}</div>`;
+}
+
+/* ---------- the plan: identify -> select -> simulate -> verify ---------- */
+function picksTable(rows, empty) {
+  if (!rows.length) return `<div class="empty">${esc(empty)}</div>`;
+  return `<div class="scroll"><table><thead><tr><th>#</th><th>Asset</th><th>Long on (pays less)</th><th>Short on (earns more)</th><th class="num">7-day avg APR</th><th class="num">Current APR</th><th class="num">Steady</th>
+    <th class="num">Replay net (in-sample)</th><th>Forward paper trial</th><th class="num">Forward net so far</th><th>Availability</th></tr></thead><tbody>` +
+    rows.map(r => { const s = r.simulation, costs = s ? s.entry_fees + s.exit_fees + s.slippage_cost : null;
+      const kind = t => `<span class="muted">(${esc(t.toLowerCase())})</span>`;
+      return `<tr><td class="num">${r.rank}</td><td>${esc(r.asset)}</td><td>${esc(r.long)} ${kind(r.long_type)}</td><td>${esc(r.short)} ${kind(r.short_type)}</td>
+        <td class="num ${cls(r.score_apr)}">${fmt(r.score_apr, 1)}%</td><td class="num ${cls(r.now_apr)}">${fmt(r.now_apr, 1)}%</td><td class="num">${fmt(r.steady * 100, 0)}%</td>
+        <td class="num ${cls(s && s.net)}">${s ? signMoney(s.net) : "n/a"}<div class="why">${s ? (s.price_checked ? "hourly equity checks" : "equity exits untested") : "history unavailable"}</div></td>
+        <td>${esc(r.forward?.status || "pending")}${r.forward?.shadow ? " · shadow" : ""}<div class="why">${esc(r.forward?.entry_wait || r.forward?.reason || r.forward?.trade_id || "")}</div></td>
+        <td class="num ${cls(r.forward?.net)}">${r.forward?.net == null ? "n/a" : signMoney(r.forward.net)}</td>
+        <td>${r.tradable ? `<span class="pill good">yes</span>` : `<span class="pill">no</span><div class="why">${esc(r.why_not || "")}</div>`}</td></tr>`; }).join("") + `</tbody></table></div>`;
+}
+
+function renderPlan(sel, o) {
+  const sw = o.sweep || {}, pairs = sw.pairs_total ?? sel.pairs_considered ?? 0;
+  const overall = sel.overall || [], tradable = sel.tradable || [];
+  const opened = sw.opened || 0, verified = sw.verified || 0;
+  $("steps").innerHTML = [
+    ["1 · Identify", fmt(pairs, 0), `possible pairs across ${sw.assets_scanned ?? "…"} coins, each with its last 7 days of funding, from Zero Delta`],
+    ["2 · Select", sel.count ? `top ${sel.count}` : "none yet", `ranked by ${sel.metric === "median" ? "median" : "average"} funding edge over 7 days; exchanges named below`],
+    ["3 · Simulate", overall.length + tradable.length ? "forward + week 2" : "n/a", "week 1 selects, unseen week 2 tests; current picks run forward paper trials"],
+    ["4 · Verify &amp; trade", `${verified} checked · ${opened} gated · ${sw.shadow_opened || 0} shadow`, "spread and volatility rechecked per slice; waiting picks checked every minute"]
+  ].map(([t, n, d]) => `<div class="step"><b>${t}</b><span class="n">${n}</span><span class="muted">${d}</span></div>`).join("");
+  $("picks").innerHTML = `<div class="picks"><h3>Best pairs in the whole market</h3>${picksTable(overall, "No selection yet: waiting for the first scan.")}
+    <h3>Best pairs the bot can actually trade (these go to the live checks)</h3>${picksTable(tradable, "None of the top pairs can be traded yet: they need an exchange adapter the bot does not have.")}</div>`;
+  const wf = sel.rule_check || {}, source = wf.tradable || [], track = sel.track_record || [];
+  const palette = ["var(--accent)", "var(--info)", "var(--warn)"];
+  const series = source.filter(r => r.realised).map((r, i) => ({name: `${r.asset}: unseen week 2`, color: palette[i % palette.length],
+    points: r.realised.curve.map(c => ({t: new Date(c.at).getTime(), v: c.net}))}));
+  const comparison = rows => `<div class="scroll"><table><thead><tr><th>Picked at</th><th>Asset / venues</th><th class="num">Week 1 replay net</th><th class="num">Unseen week 2 net</th><th>Exit</th></tr></thead><tbody>${rows.map(r => `<tr><td>${dt(r.picked_at)}</td><td>${esc(r.asset)} · ${esc(r.long)} → ${esc(r.short)}</td><td class="num">${r.predicted ? signMoney(r.predicted.net) : "n/a"}</td><td class="num ${cls(r.realised?.net)}">${r.realised ? signMoney(r.realised.net) : "n/a"}</td><td>${esc(r.realised?.exit_reason || "history incomplete")}</td></tr>`).join("")}</tbody></table></div>`;
+  $("sim-chart").innerHTML = `<h2>Walk-forward: week 1 picks tested on unseen week 2</h2>` +
+    (source.length ? comparison(source) : `<div class="empty">Needs two complete weeks of shared funding history.</div>`) +
+    (series.length ? timeChart(series, {label: "Unseen week 2 estimated net profit", fmt: v => signMoney(v), lines: [{at: 0, color: "var(--muted)", label: "break-even"}]}) : "") +
+    `<h3>Saved picks, assessed one week later</h3>` + (track.length ? comparison(track.filter(r => r.kind === "tradable").slice(0, 12).map(r => ({...r, realised: r.result}))) : `<div class="empty">Building a track record. The first saved picks mature after seven days.</div>`);
+  $("plan-note").textContent = "The selection-week replay is an in-sample diagnostic. Week 2 and saved-pick results are hourly estimates: today's volume filter, assumed fees/slippage, no historical spread/1-minute volatility, and no venue basis. Forward trials use fresh venue data and the real engine. Shadow research keeps the standard net-edge gate's rejection visible; all figures are paper money.";
+}
+
+/* ---------- scanner section ---------- */
+function funnelRows(steps) {
+  const max = Math.max(1, ...steps.map(x => x[1]));
+  return steps.map(([label, v], i) => `<div class="row"><span>${label}</span><div class="track"><div class="fill ${i === steps.length - 1 ? "end" : ""}" style="width:${(v / max) * 100}%"></div></div><span class="num">${fmt(v, 0)}</span></div>`).join("");
+}
+function renderFunnels(o) {
+  const el = $("funnels"), sw = o.sweep || {}, entries = Object.entries(o.scans);
+  if (!sw.assets_total) { el.innerHTML = `<div class="empty">First sweep in progress…</div>`; return; }
+  const all = `<div class="funnel"><h3>All coins <span class="muted" style="font-weight:400">· swept ${ago(sw.finished_at)}, took ${dur(sw.duration_seconds)}</span></h3>
+    ${funnelRows([["Coins listed", sw.assets_total], ["Coins read", sw.assets_scanned], ["Coins with pairs", sw.assets_with_pairs], ["Possible pairs", sw.pairs_total],
+      ["Tradable here", sw.tradable_pairs], ["Checked live", sw.verified], ["Passed all checks", sw.passed || 0]])}
+    <small class="muted">${sw.assets_failed ? sw.assets_failed + " coin(s) could not be read. " : ""}${sw.aborted ? "Sweep stopped early: " + esc(sw.aborted) + "." : ""}</small></div>`;
+  el.innerHTML = all + entries.map(([asset, s]) => {
+    const out = Object.entries(s.outcomes).map(([k, v]) => `${v}× ${(OUTCOME[k] || ["", k])[1].toLowerCase()}`).join(", ");
+    return `<div class="funnel"><h3>${esc(asset)} <span class="muted" style="font-weight:400">· ${s.executable_pairs} tradable of ${s.pairs} pairs</span></h3>
+      ${s.zero_delta_ok ? funnelRows([["Venues listed", s.markets], ["Volume & 7-day data ok", s.eligible_markets], ["Possible pairs", s.pairs], ["Tradable here", s.executable_pairs], ["Checked live", s.verified], ["Passed all checks", s.outcomes.ENTER || 0]]) : `<div class="empty">Unavailable: ${esc(s.note)}</div>`}<small class="muted">${out ? esc(out) : ""}</small></div>`;
+  }).join("");
+}
+function renderBlockers(o) {
+  const b = o.top_blockers, max = Math.max(1, ...b.map(x => x.count));
+  $("blockers").innerHTML = b.length ? b.map(x => `<div class="blk"><span>${esc(x.plain)}</span><div class="track"><div class="fill" style="width:${x.count / max * 100}%"></div></div><span class="num">${x.count}</span></div>`).join("") : `<div class="empty">No rejections recorded yet.</div>`;
+  $("blockers-note").textContent = "Counted over the last 200 checks. One pair can fail several checks at once.";
+}
+function renderAlerts(list) {
+  $("alerts").innerHTML = list.length ? list.map(a => `<div class="alert"><span class="muted num" style="white-space:nowrap">${time(a.at)}</span><span><span class="sev-${esc(a.severity)}">${esc(a.kind.replaceAll("_", " "))}</span>${a.trade_id ? ` <span class="muted">(${esc(a.trade_id)})</span>` : ""}<br><span class="muted">${esc(a.message)}</span></span></div>`).join("") : `<div class="empty">No alerts yet.</div>`;
+}
+function renderOpps(opps) {
+  const rows = opps.pairs || [];
+  $("opp-tabs").innerHTML = "";
+  $("opp").innerHTML = `<thead><tr><th>Asset</th><th>Long (pays less)</th><th>Short (earns more)</th><th>Type</th><th class="num">7-day avg</th><th class="num">Right now</th><th class="num">Steady</th><th class="num">Flips</th><th>Tradable</th></tr></thead><tbody>` +
+    (rows.length ? rows.map(r => `<tr><td><b>${esc(r.asset)}</b></td><td>${esc(r.long)}</td><td>${esc(r.short)}</td><td class="muted">${esc(r.type)}</td><td class="num ${r.mean_apr > 0 ? "pos" : ""}">${fmt(r.mean_apr, 1)}%</td><td class="num">${fmt(r.now_apr, 1)}%</td><td class="num">${fmt(r.positive_ratio * 100, 0)}%</td><td class="num">${r.sign_flips}</td><td>${r.executable ? `<span class="pill good">yes</span>` : `<span class="pill">no adapter</span>`}</td></tr>`).join("") : `<tr><td colspan="9"><div class="empty">Waiting for the first sweep…</div></td></tr>`) + `</tbody>`;
+}
+function renderDecisions(list) {
+  if (!list.length) { $("decisions").innerHTML = `<tr><td><div class="empty">Nothing checked yet.</div></td></tr>`; return; }
+  $("decisions").innerHTML = `<thead><tr><th>Time</th><th>Pair</th><th>Result</th><th>Why</th><th class="num">Edge after costs</th><th class="num">Volatility</th></tr></thead><tbody>` +
+    list.map(d => `<tr><td class="muted num">${time(d.at)}</td><td>${esc(d.asset)} · ${esc(d.long)} → ${esc(d.short)}</td><td>${outChip(d.outcome)}</td><td>${d.failed_plain.length ? d.failed_plain.map(x => `<span class="reason">${esc(x)}</span>`).join("") : `<span class="muted">all checks passed</span>`}
+      <details><summary>every check</summary><div class="kv">${d.checks.map(c => `<dt>${c.passed ? "✓" : "✗"} ${esc(c.name)}</dt><dd>${esc(c.value)} (limit ${esc(c.limit)})</dd>`).join("")}</div></details></td>
+      <td class="num">${d.expected_net_edge_bps == null ? "n/a" : fmt(d.expected_net_edge_bps, 1) + " bps"}</td><td class="num">${d.low_vol_score == null ? "n/a" : fmt(d.low_vol_score, 0) + " / 45"}</td></tr>`).join("") + `</tbody>`;
+}
+function renderSettings(o) {
+  const L = o.locked;
+  $("settings").innerHTML = `<div class="grid g2"><div><h3>Fixed by the specification</h3><dl class="kv">
+      <dt>Max leverage</dt><dd>${L.max_leverage}x</dd><dt>Entry time</dt><dd>${L.twap_minutes / 60} hours</dd>
+      <dt>Largest slice</dt><dd>$${L.child_usd} per side</dd><dt>Volatility limit</dt><dd>≤ ${L.low_vol_percentile}th percentile</dd>
+      <dt>Slow exit at</dt><dd>${fmt(L.controlled_exit_ratio * 100, 0)}% of starting balance (3 h)</dd>
+      <dt>Emergency exit below</dt><dd>${fmt(L.emergency_exit_ratio * 100, 0)}% (about 1 min)</dd></dl></div>
+    <div><h3>Chosen for paper mode</h3><dl class="kv"><dt>Size per side</dt><dd>$${fmt(o.limits.target_notional_per_leg_usd, 0)}</dd>
+      <dt>Leverage</dt><dd>${o.limits.leverage}x</dd><dt>Max open trades</dt><dd>${o.limits.max_concurrent_trades}</dd></dl>
+      <details style="margin-top:8px"><summary>${o.paper_defaults_in_use.length} settings use labelled paper defaults</summary><p class="muted mono" style="font-size:.76rem">${o.paper_defaults_in_use.map(esc).join(", ")}</p></details></div></div>`;
+}
+
+/* ---------- loop ---------- */
+async function get(path) { const r = await fetch(path, {cache: "no-store"}); if (!r.ok) throw new Error(path + " " + r.status); return r.json(); }
+async function refresh() {
+  try {
+    const [overview, perf, decisions, opps, alerts, trades, selection] = await Promise.all([get("/api/overview"), get("/api/performance"), get("/api/decisions?limit=40"), get("/api/opportunities"), get("/api/alerts?limit=40"), get("/api/trades"), get("/api/selection")]);
+    data = {overview, perf, decisions, opps, alerts, trades, selection};
+    renderTop(overview); renderKpis(perf); renderNarrative(overview); renderPlan(selection, overview); renderCharts(perf); renderTrades(trades);
+    renderFunnels(overview); renderBlockers(overview); renderAlerts(alerts); renderOpps(opps); renderDecisions(decisions); renderSettings(overview);
+    if (!selectedTrade && trades.length) selectedTrade = (trades.find(t => !["CLOSED", "REJECTED"].includes(t.state)) || trades[0]).id;
+    await loadDetail();
+  } catch (e) {
+    $("updated").textContent = "Cannot reach the bot (" + e.message + "). Retrying…";
+    $("health").className = "pill bad"; $("health").textContent = "Disconnected";
+  }
+}
+$("theme").onclick = () => { const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme:dark)").matches ? "dark" : "light");
+  const next = cur === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = next; try { localStorage.setItem("theme", next); } catch {} };
+try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch {}
+refresh(); setInterval(refresh, 5000);
+</script>
+</body>
+</html>
