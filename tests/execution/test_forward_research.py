@@ -436,3 +436,36 @@ def test_a_stale_looking_book_is_fetched_once_more_but_really_stale_data_still_b
         w.clock.advance(seconds=5)
         assert w.step()[a.id].action.value == "PAUSE_SLICES"
     assert len(w.alerts("stale_direct_data")) - before == 1  # one alert for the whole stale episode, after 30 s
+
+
+def test_a_pick_that_fails_a_permanent_check_is_set_aside_so_its_slot_is_free():
+    """Live 2026-10-02: ONE (two different coins under one ticker on Binance and OKX) was the top tradable pick of every
+    sweep for days and failed legs_track_same_underlying every time. It is now set aside for 24 h."""
+    r = Rig()
+    r.src["S"].mid = D(200)  # the short venue lists a different asset under the same ticker
+    rep = r.scan()
+    assert rep.verified == 1 and rep.outcomes == {"REJECT": 1} and not r.engine.active
+    assert r.scanner.watch == []  # not re-verified every minute either
+    forward = r.scanner.last_selection["tradable"][0]["forward"]
+    assert forward["status"] == "set_aside" and "legs_track_same_underlying" in forward["reason"]
+
+    r.clock.advance(minutes=20)
+    rep = r.scan()
+    assert rep.verified == 0 and r.scanner.last_selection["tradable"] == []  # its slot goes to the next pair
+    market = r.scanner.last_selection["overall"][0]
+    assert market["tradable"] is False and market["why_not"].startswith("set aside until")
+
+    key = next(iter(r.scanner._parked))
+    r.scanner._parked[key] = (r.clock.now(), r.scanner._parked[key][1])  # the 24 h are over
+    r.src["S"].mid = D(100)
+    rep = r.scan()
+    assert rep.verified == 1 and rep.outcomes == {"ENTER": 1} and key not in r.scanner._parked
+
+
+def test_the_walk_forward_replay_ignores_todays_set_aside_pairs():
+    r = Rig()
+    r.src["S"].mid = D(200)
+    r.scan()
+    pair = r.scanner._found["BTC"][1][0]
+    assert r.scanner._select([pair])[1] == []  # today: set aside
+    assert len(r.scanner._select([pair], with_earnings=False)[1]) == 1  # last week's replay did not know about it

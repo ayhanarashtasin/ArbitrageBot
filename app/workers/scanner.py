@@ -62,6 +62,12 @@ TRADFI_VENUE_HINTS = frozenset({"Trade.xyz", "Ondo Perps", "Ligher on RH"})
 PRICE_SOURCES = ("Binance USDT", "Bybit USDT", "Hyperliquid", "OKX", "Gate", "MEXC USDT", "BloFin USDT", "Bitget")
 
 
+# A pick that fails a check which cannot change within hours is set aside, so the next best pair takes its slot.
+# Live 2026-10-02: ONE (Binance and OKX list two different coins under that ticker, prices 7 % apart) was the top
+# tradable pick of every sweep for days and failed legs_track_same_underlying every time, wasting one of three slots.
+PERMANENT_CHECKS = frozenset({"legs_track_same_underlying"})
+PARK_FOR = timedelta(hours=24)
+
 
 def scan_stale_seconds(params: ResolvedParams) -> float:
     """A sweep reports once per cycle (several minutes of sweeping plus the pause): two cycles and a margin. Sweep
@@ -119,6 +125,7 @@ class Scanner:
         self._asset_class: dict[str, str] = {}
         self._bars: dict[str, dict[datetime, Bar]] = {}
         self._selected_keys: set[tuple] = set()
+        self._parked: dict[tuple, tuple[datetime, str]] = {}  # pair key -> (set aside until, failed checks)
         self._enter_lock = asyncio.Lock()  # the sweep and the watch never open the same pair twice
 
     # ---- Zero Delta ---------------------------------------------------------------------------
@@ -421,10 +428,36 @@ class Scanner:
         }
 
     def _select(self, pairs: list[PairAnalytics], *, with_earnings: bool = True) -> tuple[list[Pick], list[Pick]]:
+        """with_earnings=False is the walk-forward replay of an earlier week: today's earnings blackout and today's
+        set-aside pairs did not exist then, so neither applies."""
         return select(pairs, self.params.selection_count, self.params.selection_metric, self._source_for,
                       one_per_asset=self.params.selection_one_per_asset,
                       require_live_edge=self.params.selection_require_live_edge,
-                      blocked=(lambda p: self._earnings_block.get(p.asset)) if with_earnings else None)
+                      blocked=(lambda p: self._earnings_block.get(p.asset) or self._parked_reason(p))
+                      if with_earnings else None)
+
+    def _parked_reason(self, pair: PairAnalytics) -> str | None:
+        entry = self._parked.get(self._key(pair))
+        if entry is None:
+            return None
+        until, failed = entry
+        if self.clock.now() >= until:
+            self._parked.pop(self._key(pair), None)
+            return None
+        return f"set aside until {until:%Y-%m-%d %H:%M} UTC: failed {failed}"
+
+    def _park_if_permanent(self, pair: PairAnalytics, decision: Decision) -> bool:
+        """True when the pair failed a check that will not clear within hours: it leaves the watch and the next
+        selection, so its slot goes to the next best pair."""
+        failed = sorted(c.name for c in decision.checks if not c.passed and c.name in PERMANENT_CHECKS)
+        if not failed:
+            return False
+        self._parked[self._key(pair)] = (self.clock.now() + PARK_FOR, ", ".join(failed))
+        self._forward_status(pair, "set_aside", f"set aside for {PARK_FOR.total_seconds() / 3600:.0f} h: "
+                             + ", ".join(failed))
+        log.info("set aside %s long %s / short %s: %s", pair.asset, pair.long_leg.venue_name,
+                 pair.short_leg.venue_name, ", ".join(failed))
+        return True
 
     def _walk_forward(self, found: dict) -> dict:
         """Run the SAME selection a week ago and replay the week that followed: did picking this way make money?
@@ -544,6 +577,8 @@ class Scanner:
                 self._record(pair, decision, report)
                 self._watch_seen[self._key(pair)] = (decision.outcome, tuple(decision.reasons))
                 await self._announce(pair, decision)
+                if self._park_if_permanent(pair, decision):
+                    continue  # not watched: it cannot pass, and the next sweep gives its slot to another pair
                 if await self._admit(pair, decision, report, found[pair.asset][0]):
                     opened_assets.add(pair.asset)  # one new trade per asset per scan
                 else:
@@ -578,6 +613,8 @@ class Scanner:
                     self._watch_seen[self._key(pair)] = seen
                     self._record(pair, decision, None)
                     await self._announce(pair, decision)
+                if self._park_if_permanent(pair, decision):
+                    continue
                 report = self.last_report.get(pair.asset) or ScanReport(pair.asset)
                 if kept is not None and await self._admit(pair, decision, report, kept):
                     opened += 1

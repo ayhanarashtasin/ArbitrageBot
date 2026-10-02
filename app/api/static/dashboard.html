@@ -584,7 +584,7 @@ function renderOverview() {
   setHTML($("ov-alerts"), al.length ? al.map(alertRow).join("") : empty("Nothing needs attention right now.", "check-circle"));
 }
 const fwdChip = f => { const st = f?.status || "pending";
-  const map = {ENTERING: ["info", "Entering"], HEDGED_OPEN: ["good", "Holding"], shadow: ["warn", "Shadow trial"], paper: ["good", "Paper trade"], waiting: ["warn", "Waiting"], active: ["info", "Already trading"], unavailable: ["", "Not tradable"], pending: ["", "Pending"]};
+  const map = {ENTERING: ["info", "Entering"], HEDGED_OPEN: ["good", "Holding"], shadow: ["warn", "Shadow trial"], paper: ["good", "Paper trade"], waiting: ["warn", "Waiting"], set_aside: ["", "Set aside 24 h"], active: ["info", "Already trading"], unavailable: ["", "Not tradable"], pending: ["", "Pending"]};
   const [c, t] = map[st] || ["", st]; const why = f?.entry_wait || f?.reason; return `<span class="chip ${c}" title="${esc(why ? plainList(why).join(", ") : "")}">${esc(t)}</span>`; };
 /* the same alert repeating (kind + trade) becomes one row with a count: newest first */
 function groupAlerts(list) {
