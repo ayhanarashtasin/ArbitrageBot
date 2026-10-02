@@ -884,7 +884,16 @@ class TradeEngine:
 
     # ==== driving the engine =====================================================================
     async def run_once(self) -> dict[str, RiskDecision | None]:
-        return {tid: await self.step(t) for tid, t in list(self.active.items())}
+        """Step every active trade at the same time.
+
+        Live 2026-10-02: trades were stepped one after another, so each Binance timeout on one trade froze the risk
+        checks of an unrelated Gate/MEXC trade for 36-49 s (normal cycle 7.6 s). Every trade has its own legs, paper
+        accounts and executor, step() never raises, and the venue adapters underneath are httpx clients that are safe
+        to share between concurrent requests.
+        """
+        items = list(self.active.items())
+        results = await asyncio.gather(*(self.step(t) for _, t in items))
+        return {tid: result for (tid, _), result in zip(items, results)}
 
     def recommended_delay(self) -> float:
         """Seconds until the next cycle: fast during an emergency exit, slower while just holding."""

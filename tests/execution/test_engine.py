@@ -537,3 +537,39 @@ def test_a_settlement_is_paid_once_even_if_the_venue_still_reports_it_as_next():
     b.pending_funding = {role: (boundary, D("0.0003")) for role in ("long", "short")}
     run(restored._accrue_funding(b, obs))
     assert len([f for f in w.repo.funding_payments(a.id) if f.timestamp.replace(tzinfo=boundary.tzinfo) == boundary]) == 2
+
+
+class HangingSource(FakeSource):
+    """A venue whose order book request hangs until released (a lost connection that has not timed out yet)."""
+
+    block: asyncio.Event | None = None
+
+    async def get_order_book(self, symbol: str, depth: int = 50):
+        if self.block is not None:
+            await self.block.wait()
+        return await super().get_order_book(symbol, depth)
+
+
+def test_a_hanging_venue_on_one_trade_does_not_freeze_the_other_trades():
+    """Live 2026-10-02: trades were stepped one after another, so a Binance timeout on AERO stopped the risk checks of
+    an unrelated trade for 36-49 s. Trades are now stepped together."""
+    w = World()
+    hanging = HangingSource("L", 100, clock=w.clock)
+    w.src.update({"L": hanging, "L2": FakeSource("L2", 100, clock=w.clock), "S2": FakeSource("S2", 100, clock=w.clock)})
+
+    async def scenario():
+        first = await w.engine.open_trade(make_pair_analytics("L", "S"), {"decision": {"outcome": "ENTER"}})
+        second = await w.engine.open_trade(make_pair_analytics("L2", "S2"), {"decision": {"outcome": "ENTER"}})
+        hanging.block = asyncio.Event()
+        cycle = asyncio.create_task(w.engine.run_once())
+        for _ in range(200):
+            await asyncio.sleep(0)
+            if second.entry_done == 1:
+                break
+        assert second.last_obs is not None and second.entry_done == 1  # observed, checked and sent its slice
+        assert first.last_obs is None and not cycle.done()  # still waiting on its venue
+        hanging.block.set()
+        results = await cycle
+        assert set(results) == {first.id, second.id} and first.last_obs is not None
+
+    run(scenario())
