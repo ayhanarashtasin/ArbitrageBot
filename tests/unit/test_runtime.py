@@ -18,10 +18,17 @@ from tests.unit.test_trading_config import full_live_values
 TOKEN = "s3cret-admin-token"
 
 
-def runtime(tmp_path=None, **kw):
+def runtime(tmp_path=None, credentials=None, **kw):
     url = "sqlite://" if tmp_path is None else f"sqlite:///{tmp_path}/bot.db"
     settings = TradingSettings(_env_file=None, database_url=url, **kw)
-    return build_runtime(settings, ZeroDeltaSettings(_env_file=None), source_for_venue=lambda name: None)
+    from app.exchanges.private.credentials import LiveCredentials
+    return build_runtime(settings, ZeroDeltaSettings(_env_file=None), source_for_venue=lambda name: None,
+                         credentials=credentials or LiveCredentials(_env_file=None))
+
+
+def live_kw():
+    return dict(run_mode="live", live_trading_enabled=True, live_trading_confirmation=LIVE_CONFIRMATION_PHRASE,
+                **full_live_values())
 
 
 # ---- bootstrap and the live gate -------------------------------------------------------------
@@ -36,13 +43,30 @@ def test_live_mode_is_refused_without_the_gate():
         runtime(run_mode="live")
 
 
-def test_live_mode_is_refused_even_with_every_value_because_orders_are_not_implemented():
-    with pytest.raises(LiveGateError, match="not implemented"):
-        runtime(run_mode="live", live_trading_enabled=True, live_trading_confirmation=LIVE_CONFIRMATION_PHRASE,
-                **full_live_values())
+def test_live_mode_with_every_value_still_needs_credentials_for_two_venues():
+    from app.exchanges.private.credentials import LiveCredentials
+    with pytest.raises(LiveGateError, match="at least two venues"):
+        runtime(**live_kw())
+    one = LiveCredentials(_env_file=None, binance_api_key="k", binance_api_secret="s")
+    with pytest.raises(LiveGateError, match="at least two venues"):
+        runtime(credentials=one, **live_kw())
 
 
-def test_testnet_is_refused_until_order_placement_exists():
+def test_live_runtime_builds_with_two_venues_and_scrubs_their_secrets_from_alerts():
+    from app.exchanges.private.credentials import LiveCredentials
+    from app.execution.venue_provider import LiveVenueProvider
+    creds = LiveCredentials(_env_file=None, binance_api_key="bkey", binance_api_secret="bsecret-123",
+                            bybit_api_key="ykey", bybit_api_secret="ysecret-456")
+    rt = runtime(credentials=creds, **live_kw())
+    assert isinstance(rt.engine.provider, LiveVenueProvider)
+    assert set(rt.private_clients) == {"binance_usdt_m", "bybit_linear"}
+    assert rt.engine.provider.ready == set()  # nothing may trade before the readiness check has passed
+    assert rt.scanner.execution_venue("Binance USDT") is False
+    assert rt.notifier.scrub("leak bsecret-123 and ysecret-456") == "leak *** and ***"
+    asyncio.run(rt.aclose())
+
+
+def test_testnet_is_refused():
     with pytest.raises(LiveGateError, match="not implemented"):
         runtime(run_mode="testnet")
 

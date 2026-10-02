@@ -23,6 +23,9 @@ log = logging.getLogger(__name__)
 ERROR_ALERT_EVERY_SECONDS = 300
 # The engine loop reports every 1-15 s; three minutes of silence means it is stuck, not slow.
 ENGINE_STALE_SECONDS = 180.0
+# Live mode: every venue's readiness check is repeated this often, so a venue the user fixes becomes usable and a venue
+# that breaks stops opening trades, without a restart.
+LIVE_READINESS_EVERY_SECONDS = 1800
 
 # Trade states that mean "not healthy right now": the engine health turns red and names the trade.
 UNHEALTHY_TRADE_STATES = frozenset({TradeState.DEGRADED, TradeState.RECONCILING, TradeState.ERROR,
@@ -46,6 +49,7 @@ class Runner:
         self.engine, self.scanner, self.notifier, self.health, self.clock = engine, scanner, notifier, health, clock
         self._stop = asyncio.Event()
         self._last_error_alert = 0.0
+        self._readiness_at = 0.0
 
     def stop(self) -> None:
         self._stop.set()
@@ -56,12 +60,50 @@ class Runner:
         await self.notifier.alert(
             "startup", f"mode={self.params.run_mode}, live disabled, assets={self.settings.scan_assets}, "
                        f"{len(provenance)} parameters use paper defaults")
+        if self._live:
+            await self.check_live_venues()  # first: it also measures each venue's clock for the signed requests
         manual = await self.engine.recover()
         self.scanner.restore_watch()
         self.mark_database_health()
         self.health.mark("engine", not manual, "manual intervention needed" if manual else "recovered",
                          stale_after=ENGINE_STALE_SECONDS)
         return manual
+
+    @property
+    def _live(self) -> bool:
+        from app.execution.venue_provider import LiveVenueProvider
+        return isinstance(self.engine.provider, LiveVenueProvider)
+
+    async def check_live_venues(self) -> set[str]:
+        """Run every live venue's read-only readiness check. Only venues that pass may open NEW trades; with fewer
+        than two, new trades are blocked (open trades are always managed and exited)."""
+        provider = self.engine.provider
+        names = list(provider.clients)
+        results = await asyncio.gather(*(provider.clients[n].readiness() for n in names), return_exceptions=True)
+        ready, report = set(), {}
+        for name, result in zip(names, results):
+            if isinstance(result, BaseException):
+                self.health.mark(f"live:{name}", False, _brief(result), stale_after=2 * LIVE_READINESS_EVERY_SECONDS)
+                report[name] = {"ok": False, "checks": [{"name": "readiness", "ok": False, "detail": _brief(result)}]}
+                continue
+            failing = [c for c in result.checks if not c.ok]
+            self.health.mark(f"live:{name}", result.ok,
+                             "ready for live orders" if result.ok else "; ".join(f"{c.name}: {c.detail}" for c in failing),
+                             stale_after=2 * LIVE_READINESS_EVERY_SECONDS)
+            report[name] = {"ok": result.ok, "checks": [c.__dict__ for c in result.checks]}
+            if result.ok:
+                ready.add(name)
+        changed = ready != provider.ready
+        provider.ready = ready
+        self.engine.entry_block = None if len(ready) >= 2 else (
+            f"live: {len(ready)} venue(s) passed the readiness check, two are needed (see /health live:*)")
+        self.repo.set_kv("live_readiness", {"at": self.clock.now().isoformat(), "venues": report})
+        self._readiness_at = time.monotonic()
+        if changed or self.engine.entry_block:
+            await self.notifier.alert(
+                "startup", f"live venues ready: {sorted(ready) or 'none'}; not ready: "
+                           f"{sorted(set(names) - ready) or 'none'}", severity="warning" if self.engine.entry_block else "info")
+        return ready
 
     async def _guard(self, name: str, coro) -> bool:
         """Run one iteration. True when it completed; False (health red, alert rate limited) when it raised."""
@@ -119,6 +161,8 @@ class Runner:
 
     async def scan_loop(self) -> None:
         while not self._stop.is_set():
+            if self._live and time.monotonic() - self._readiness_at > LIVE_READINESS_EVERY_SECONDS:
+                await self._guard("live readiness", self.check_live_venues())
             if self.engine.kill.entries_allowed and not self.engine.blocked():
                 assets = await self.scanner.resolve_assets(self.settings.scan_assets, self.settings.exclude_assets)
                 await self._guard("scanner", self.scanner.scan_all(assets))

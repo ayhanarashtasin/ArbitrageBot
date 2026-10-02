@@ -22,6 +22,7 @@ from app.domain.trade import EXPOSED, TERMINAL, TradeState, check_transition
 from app.exchanges.base import ExchangeError, ExchangeRequestError
 from app.execution.delta import DeltaState
 from app.execution.pair_executor import Leg, PairExecutor, SliceResult, SliceTooSmall
+from app.execution.live import LiveVenue
 from app.execution.paper import PaperVenue
 from app.execution.twap import TwapPlan, make_exit_plan, make_lot_entry_plan
 from app.execution.venue_provider import VenueProvider
@@ -101,6 +102,7 @@ class ActiveTrade:
     entry_stop: str | None = None  # why the entry should end early with what it holds (edge decayed / max hold)
     stale_since: datetime | None = None  # start of the current stale-data episode (slices are paused meanwhile)
     stale_alerted: bool = False
+    funding_polled: dict[str, datetime] = field(default_factory=dict)  # live legs: when funding was last read
 
     @property
     def legs(self) -> tuple[Leg, Leg]:
@@ -119,6 +121,8 @@ LAST_KNOWN_PRICE_MAX_AGE = timedelta(minutes=5)
 # MEXC's cached snapshots crossed the 3 s limit for a single cycle about every 8 minutes (133 warnings in 17 h, each
 # cleared by the next cycle), which buried the alerts that needed attention.
 STALE_ALERT_AFTER = timedelta(seconds=30)
+# Live legs: funding is read from the venue's own account records (venues post a settlement within minutes).
+LIVE_FUNDING_POLL = timedelta(minutes=10)
 
 
 class TradeEngine:
@@ -130,11 +134,14 @@ class TradeEngine:
         self.owner = owner
         self.earnings = earnings
         self.active: dict[str, ActiveTrade] = {}
+        # In-memory reason that stops NEW trades without a database flag (live readiness: fewer than two venues ready).
+        # Open trades are always managed and exited regardless.
+        self.entry_block: str | None = None
 
     # ==== admission ==============================================================================
     def blocked(self) -> str | None:
         flag = self.repo.get_kv("block_new_trades")
-        return flag.get("reason") if flag else None
+        return flag.get("reason") if flag else self.entry_block
 
     def portfolio_room(self, pair: PairAnalytics) -> tuple[bool, str]:
         """Section 51 limits. Notional per venue counts one leg; per asset and total count both legs."""
@@ -281,6 +288,9 @@ class TradeEngine:
         """
         now = self.clock.now()
         for leg in active.legs:
+            if isinstance(leg.venue, LiveVenue):
+                await self._collect_live_funding(active, leg)
+                continue
             info = obs.funding[leg.role]
             if info is None or info.next_funding_time is None:
                 continue
@@ -312,10 +322,34 @@ class TradeEngine:
                     (last_paid is None or info.next_funding_time > last_paid):
                 active.pending_funding[leg.role] = (info.next_funding_time, info.funding_rate)
 
+    async def _collect_live_funding(self, active: ActiveTrade, leg: Leg) -> None:
+        """Real funding, as the venue booked it. Each settlement is recorded once: a settlement at or before the last one
+        recorded for this leg is skipped (that also covers a restart, which reloads the recorded payments)."""
+        now = self.clock.now()
+        last_poll = active.funding_polled.get(leg.role)
+        if last_poll is not None and now - last_poll < LIVE_FUNDING_POLL:
+            return
+        active.funding_polled[leg.role] = now
+        try:
+            new = await leg.venue.collect_funding()
+        except ExchangeError as exc:
+            log.warning("trade %s: could not read %s funding: %s", active.id, leg.role, exc)
+            return
+        for p in sorted(new, key=lambda p: p.time):
+            last = active.last_settled.get(leg.role)
+            if last is not None and p.time <= last:
+                continue
+            active.last_settled[leg.role] = p.time
+            active.funding_ledger.append(FundingRecord(leg.role, p.amount, p.amount))
+            self.repo.add_funding_payment(active.id, leg.venue.name, leg.meta.symbol, p.time, D(0), D(0),
+                                          p.amount, p.amount)
+            await self.notifier.alert("funding_payment", f"{leg.role} {leg.venue.name}: {p.amount:+.6f} USD (venue "
+                                      "record)", trade_id=active.id)
+
     # ==== persistence helpers ====================================================================
     def _persist_accounts(self, active: ActiveTrade) -> None:
         for leg in active.legs:
-            if isinstance(leg.venue, PaperVenue):
+            if isinstance(leg.venue, (PaperVenue, LiveVenue)):
                 self.repo.save_paper_account(leg.venue.paper_key, leg.venue.snapshot())  # type: ignore[attr-defined]
 
     async def _sync_orders(self, active: ActiveTrade) -> None:

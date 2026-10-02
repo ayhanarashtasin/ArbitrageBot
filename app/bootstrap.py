@@ -1,7 +1,9 @@
 """Wires the bot together. The ONLY place that decides which adapters and providers exist.
 
-Paper mode is the only mode that can start today: live and testnet need real order placement
-(project.md phase 8), which is not implemented, so they refuse to start even if every gate is satisfied.
+Paper mode: real market data, simulated accounts. Live mode (project.md phase 8): real orders on the venues that
+have API credentials, only after every live gate is satisfied (LIVE_TRADING_ENABLED, the confirmation phrase, every
+REQUIRED_BEFORE_LIVE value) and at least two venues have credentials. At startup each venue's readiness check decides
+whether it may open NEW trades; open trades are always managed. Testnet is not implemented and refuses to start.
 """
 
 import logging
@@ -14,7 +16,7 @@ from app.core.health import Health
 from app.core.trading_config import LiveGateError, ResolvedParams, TradingSettings, check_live_gate
 from app.exchanges.base import ExchangeAdapter
 from app.execution.engine import TradeEngine
-from app.execution.venue_provider import PaperVenueProvider
+from app.execution.venue_provider import LiveVenueProvider, PaperVenueProvider
 from app.notifications.notifier import Notifier
 from app.persistence.repository import Repository
 from app.providers.zerodelta import ZeroDeltaProvider
@@ -42,6 +44,7 @@ class Runtime:
     runner: Runner
     zd: ZeroDeltaProvider | None
     adapters: dict = field(default_factory=dict)
+    private_clients: dict = field(default_factory=dict)  # live mode: signed clients by venue
 
     async def aclose(self) -> None:
         if self.scanner.earnings is not None:
@@ -50,6 +53,8 @@ class Runtime:
             await self.zd.aclose()
         for adapter in self.adapters.values():
             await adapter.close()
+        for client in self.private_clients.values():
+            await client.close()
 
 
 def default_source_lookup(cache: dict) -> SourceLookup:
@@ -75,14 +80,26 @@ def build_runtime(
     clock: Clock | None = None,
     source_for_venue: SourceLookup | None = None,
     zd: ZeroDeltaProvider | None = None,
+    credentials=None,
 ) -> Runtime:
     settings = settings or TradingSettings()
+    if settings.run_mode == "testnet":
+        raise LiveGateError("RUN_MODE=testnet is not implemented: use paper, or live (check the venues first with "
+                            "python -m app.tools.live_check)")
     check_live_gate(settings)  # refuses live mode unless every gate and value is explicit
-    if settings.run_mode != "paper":
-        raise LiveGateError(
-            f"RUN_MODE={settings.run_mode!r} needs real order placement, which is not implemented yet "
-            "(project.md phase 8). Only paper mode can start.")
     params = settings.resolve()
+    live = settings.run_mode == "live"
+    private_clients: dict = {}
+    credential_secrets: list[str] = []
+    if live:
+        from app.exchanges.private.credentials import LiveCredentials
+        from app.exchanges.private.registry import build_private_clients
+        credentials = credentials or LiveCredentials()
+        private_clients = build_private_clients(credentials)
+        if len(private_clients) < 2:
+            raise LiveGateError("live mode needs complete API credentials for at least two venues (each trade has a "
+                                f"long and a short venue); configured: {sorted(private_clients) or 'none'}")
+        credential_secrets = credentials.secret_values()
     zd_settings = zd_settings or ZeroDeltaSettings()
     clock = clock or Clock()
     repo = Repository(settings.database_url, clock)
@@ -102,6 +119,7 @@ def build_runtime(
     secrets = [v.get_secret_value() for v in (zd_settings.session_cookie,) if v is not None]
     if settings.admin_api_token:
         secrets.append(settings.admin_api_token)
+    secrets.extend(credential_secrets)  # API keys never appear in an alert
     notifier = Notifier(repo, telegram_enabled=settings.telegram_enabled, bot_token=settings.telegram_bot_token,
                         chat_id=settings.telegram_chat_id, secrets=secrets)
 
@@ -109,7 +127,13 @@ def build_runtime(
     lookup = source_for_venue or default_source_lookup(adapters)
     earnings = EarningsCalendar(blackout_days=params.earnings_blackout_days, now=clock.now,
                                auto_fetch=settings.earnings_auto_fetch, file_path=settings.earnings_calendar_file)
-    provider = PaperVenueProvider(lookup, clock, repo)
+    provider = LiveVenueProvider(lookup, private_clients, clock, repo) if live else PaperVenueProvider(lookup, clock, repo)
+    execution_venue = None
+    if live:
+        from app.exchanges.private.registry import LIVE_ZERODELTA_VENUES
+
+        def execution_venue(zd_venue: str) -> bool:
+            return zd_venue in LIVE_ZERODELTA_VENUES and provider.tradable_venue(zd_venue)
     engine = TradeEngine(params=params, repo=repo, clock=clock, killswitch=kill, notifier=notifier, provider=provider,
                          earnings=earnings)
 
@@ -120,7 +144,8 @@ def build_runtime(
 
     scanner = Scanner(params=params, zd_settings=zd_settings, zd=zd, source_for_venue=lookup, repo=repo,
                       engine=engine, notifier=notifier, clock=clock, health=health,
-                      earnings=earnings)
+                      earnings=earnings, execution_venue=execution_venue)
     runner = Runner(settings=settings, params=params, repo=repo, engine=engine, scanner=scanner, notifier=notifier,
                     health=health, clock=clock)
-    return Runtime(settings, params, repo, clock, kill, notifier, health, engine, scanner, runner, zd, adapters)
+    return Runtime(settings, params, repo, clock, kill, notifier, health, engine, scanner, runner, zd, adapters,
+                   private_clients)

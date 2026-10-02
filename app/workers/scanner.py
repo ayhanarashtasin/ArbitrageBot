@@ -105,9 +105,13 @@ class _Kept:
 class Scanner:
     def __init__(self, *, params: ResolvedParams, zd_settings: ZeroDeltaSettings, zd: ZeroDeltaProvider | None,
                  source_for_venue: Callable[[str], ExchangeAdapter | None], repo: Repository, engine: TradeEngine,
-                 notifier: Notifier, clock: Clock, health=None, earnings: EarningsCalendar | None = None):
+                 notifier: Notifier, clock: Clock, health=None, earnings: EarningsCalendar | None = None,
+                 execution_venue: Callable[[str], bool] | None = None):
         self.params, self.zd_settings, self.zd = params, zd_settings, zd
-        self._source_for = source_for_venue
+        self._source_for = source_for_venue  # market data: every venue with a public adapter
+        # Live mode: only venues with credentials that passed their readiness check can be TRADED. None = paper mode,
+        # where every venue with an adapter can be traded on paper.
+        self.execution_venue = execution_venue
         self.repo, self.engine, self.notifier, self.clock = repo, engine, notifier, clock
         self.health = health
         self.earnings = earnings
@@ -184,7 +188,7 @@ class Scanner:
     # ---- direct verification ------------------------------------------------------------------
     def _leg_fee(self, adapter: ExchangeAdapter) -> tuple[Decimal, bool]:
         taker_bps, _ = PAPER_FEES_BPS.get(adapter.name, DEFAULT_PAPER_FEE_BPS)
-        return taker_bps / BPS, False  # an assumption: real fee schedules need account access (Phase 8)
+        return taker_bps / BPS, False  # an assumption: the account's own fee tier needs a signed call (live mode)
 
     async def _prepare(self, adapter: ExchangeAdapter, leg) -> tuple[InstrumentMeta, list]:
         """Symbol and the slow, retry-prone 1-minute candles."""
@@ -202,6 +206,11 @@ class Scanner:
             fee, verified = schedule.taker_fraction, schedule.verified
         except ExchangeError:
             pass  # public data only: keep the labelled assumption
+        live_fees = getattr(self.engine.provider, "fee_schedule", None)
+        if live_fees is not None:  # live mode: the account's real tier, read through its signed client
+            schedule = await live_fees(adapter.name, meta)
+            if schedule is not None and schedule.verified:
+                fee, verified = schedule.taker_fraction, True
         settled = None
         try:  # the venue's last SETTLED rate: what Zero Delta shows, for the cross-check
             history = await adapter.get_funding_history(meta.symbol, 3)
@@ -254,7 +263,13 @@ class Scanner:
 
     # ---- step 1: identify ----------------------------------------------------------------------
     def _tradable(self, pair: PairAnalytics) -> bool:
-        return why_not_tradable(pair, self._source_for) is None
+        return why_not_tradable(pair, self._exec_source) is None
+
+    def _exec_source(self, venue: str) -> ExchangeAdapter | None:
+        src = self._source_for(venue)
+        if src is None or (self.execution_venue is not None and not self.execution_venue(venue)):
+            return None
+        return src
 
     async def resolve_assets(self, configured: list[str], excluded: list[str] | None = None) -> list[str]:
         """The coins to scan. "ALL" means every coin Zero Delta lists, most liquid first."""
@@ -443,11 +458,12 @@ class Scanner:
     def _select(self, pairs: list[PairAnalytics], *, with_earnings: bool = True) -> tuple[list[Pick], list[Pick]]:
         """with_earnings=False is the walk-forward replay of an earlier week: today's earnings blackout and today's
         set-aside pairs did not exist then, so neither applies."""
-        return select(pairs, self.params.selection_count, self.params.selection_metric, self._source_for,
+        return select(pairs, self.params.selection_count, self.params.selection_metric, self._exec_source,
                       one_per_asset=self.params.selection_one_per_asset,
                       require_live_edge=self.params.selection_require_live_edge,
                       blocked=(lambda p: self._earnings_block.get(p.asset) or self._parked_reason(p))
-                      if with_earnings else None)
+                      if with_earnings else None,
+                      missing_label="not enabled for live trading:" if self.execution_venue else "no adapter yet for")
 
     def _parked_reason(self, pair: PairAnalytics) -> str | None:
         entry = self._parked.get(self._key(pair))

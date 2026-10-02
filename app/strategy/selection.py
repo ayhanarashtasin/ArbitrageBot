@@ -50,11 +50,12 @@ def rank(pairs: list[PairAnalytics], metric: str = "mean") -> list[PairAnalytics
                                          p.long_leg.venue_name, p.short_leg.venue_name, p.asset))
 
 
-def why_not_tradable(pair: PairAnalytics, source_for_venue: Callable[[str], object | None]) -> str | None:
+def why_not_tradable(pair: PairAnalytics, source_for_venue: Callable[[str], object | None],
+                     missing_label: str = "no adapter yet for") -> str | None:
     long_src, short_src = source_for_venue(pair.long_leg.venue_name), source_for_venue(pair.short_leg.venue_name)
     missing = [n for n, s in ((pair.long_leg.venue_name, long_src), (pair.short_leg.venue_name, short_src)) if s is None]
     if missing:
-        return "no adapter yet for " + " and ".join(missing)
+        return f"{missing_label} " + " and ".join(missing)
     if long_src is short_src:
         return "both legs are on the same exchange"
     return None
@@ -76,14 +77,15 @@ def _top(flagged: list[tuple[PairAnalytics, str | None]], count: int, one_per_as
 def select(pairs: list[PairAnalytics], count: int, metric: str,
            source_for_venue: Callable[[str], object | None], *, one_per_asset: bool = False,
            require_live_edge: bool = False,
-           blocked: Callable[[PairAnalytics], str | None] | None = None) -> tuple[list[Pick], list[Pick]]:
+           blocked: Callable[[PairAnalytics], str | None] | None = None,
+           missing_label: str = "no adapter yet for") -> tuple[list[Pick], list[Pick]]:
     """(best in the market, best we can trade), each at most `count` long, ranked from 1."""
     ranked = rank(pairs, metric)
     if require_live_edge:
         ranked = [p for p in ranked if p.current_funding_edge > 0]
     flagged = []
     for p in ranked:
-        why = why_not_tradable(p, source_for_venue)
+        why = why_not_tradable(p, source_for_venue, missing_label)
         if why is None and blocked is not None:
             why = blocked(p)
         flagged.append((p, why))

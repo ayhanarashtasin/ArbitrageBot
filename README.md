@@ -40,9 +40,11 @@ trials use actual current venue data and the same execution/risk engine as gated
 | Protect | Equity, margin, liquidation, delta, connectivity; 30 % controlled exit, 10 % emergency exit, kill switch | `app/risk` |
 | Account | Funding, fees, slippage estimate and P&L reported separately; full audit trail | `app/accounting`, `app/persistence` |
 | Operate | Health, state, authenticated kill switch, Telegram alerts, restart recovery | `app/api`, `app/workers`, `app/notifications` |
+| Trade live | Signed order and account clients for Binance, Bybit, MEXC, BloFin and Bitget (USDT-margined perps, one-way mode, market orders), read-only readiness check | `app/exchanges/private`, `app/execution/live.py`, `app/tools/live_check.py` |
 
 Paper mode uses **real market data** and a **simulated account** (fills walk the real order book, with fees,
-partial fills and funding cash flows). No order ever reaches an exchange.
+partial fills and funding cash flows). No order ever reaches an exchange. Live mode runs the same engine against real
+accounts: see [Going live](#going-live).
 
 ## Quick start
 
@@ -101,8 +103,16 @@ Saved-pick windows overlap between sweeps; their estimates are repeated observat
 ## Safety model
 
 - `RUN_MODE=paper`, `LIVE_TRADING_ENABLED=false` by default. API keys never enable live trading.
-- Live mode needs the flag, the confirmation phrase **and** every `REQUIRED_BEFORE_LIVE` value set explicitly, and even
-  then it refuses today because real order placement is missing (phase 8).
+- Live mode needs the flag, the confirmation phrase, every `REQUIRED_BEFORE_LIVE` value set explicitly **and** API
+  credentials for at least two venues. Each venue must also pass its read-only readiness check before it can open a
+  trade; with fewer than two ready venues new trades are blocked (open trades are always managed and exited).
+- **Live orders are never sent twice.** A timed-out order is looked up by its client order id before anything else;
+  after a restart every order is looked up on the venue before it is sent, so an order that reached the venue just
+  before a crash is adopted, not repeated.
+- **The venue is the truth.** A live leg's equity comes from its own fills, fees and funding (the 30 % / 10 % rules mean
+  exactly what they mean in paper mode), and is cross-checked against the venue's position after every cycle: if the two
+  ever disagree, the trade goes to DEGRADED until they agree again.
+- **One trade per venue symbol**, and none on a symbol the account already holds or has open orders on.
 - Locked values (4x leverage, 6 h TWAP, $100 child, 45th percentile, 30 %/10 % exits, $5M, 7 days) cannot be loosened
   from the environment.
 - **Same underlying.** Zero Delta groups markets by ticker, and one ticker can name two assets (live: "BB" is BounceBit
@@ -198,8 +208,8 @@ tests/           unit, provider, exchange, execution, risk, chaos
 
 ## What is not done
 
-- **Real order placement** (phase 8): account and order calls raise `ExchangeNotSupported`. Venue fee schedules, funding
-  payment reconciliation from the venue, and contract-multiplier verification need account access.
+- **Live orders on OKX, Gate and Hyperliquid**: paper only (no signed client). Live trading covers Binance, Bybit, MEXC,
+  BloFin and Bitget, USDT-margined perpetuals only.
 - **WebSockets** (section 41): market data is polled over REST.
 - **Redis**: not used; single-process locking uses database leases.
 - **Alembic migrations**: tables are created with `create_all`. Add migrations before changing the schema in production.
@@ -208,7 +218,70 @@ tests/           unit, provider, exchange, execution, risk, chaos
 - **Unverified assumptions** carried from Zero Delta: the "24hr Volume (M)" column is treated as average 24h volume,
   chart timestamps as UTC, and a positive APR as "longs pay shorts".
 
-## Before any live use
+## Going live
 
-Everything in `project.md` sections 71 and 58 must be true: the parameters set explicitly, testnet mechanics verified on every
-venue, and the chaos and recovery tests passing against real venue behaviour. Paper results say nothing about live profitability.
+Live mode sends **real orders with real money**. Paper results say nothing about live profitability: so far no pair has
+passed the profit check (`MIN_EXPECTED_NET_EDGE_BPS`), and live mode only opens trades that pass every check, so a live
+bot may wait a long time before its first trade. That is the intended behaviour.
+
+**1. Prepare each exchange account** (only the ones you will use; each trade needs two):
+
+| Exchange | Account settings | API key |
+|---|---|---|
+| Binance | USDⓈ-M futures: One-way mode, Single-Asset mode | Enable Futures, no withdrawals, restrict to your IP |
+| Bybit | Unified Trading Account; margin mode Isolated or Cross (not Portfolio) | Contract / Derivatives trade, read-write, no withdrawals, your IP |
+| MEXC | KYC done; futures in one-way mode | "Order Placing" + view permissions, your IP |
+| BloFin | Futures: one-way (net) mode, isolated margin | TRADE permission, a passphrase, your IP |
+| Bitget | A **Classic** account (or a Classic-mode sub-account; Unified accounts cannot use this API); USDT-M one-way mode | Futures read-write, a passphrase, your IP |
+
+Fund each futures account with USDT: every leg needs its margin (`TARGET_NOTIONAL_PER_LEG_USD / TARGET_LEVERAGE`) plus
+20 % headroom, so at $100 per side and 4x at least $30 free per venue (more is better). Do not trade the bot's symbols by
+hand while it holds them, and switch fee payment with the exchange token off where you can (such fees are valued at the
+token's price, which is less exact).
+
+**2. Put the keys in `.env`** (`BINANCE_API_KEY`, `BINANCE_API_SECRET`, ... see `.env.example`).
+
+**3. Check, without trading:** `python -m app.tools.live_check`. It reports every venue as READY or what to fix, and what
+the live gate still needs. Repeat until it says `RESULT: ready`.
+
+**4. Set the live configuration in `.env`.** A cautious first run at $100 per side, one trade at a time:
+
+```
+RUN_MODE=live
+LIVE_TRADING_ENABLED=true
+LIVE_TRADING_CONFIRMATION=I_UNDERSTAND_LIVE_ORDERS_USE_REAL_FUNDS
+TARGET_NOTIONAL_PER_LEG_USD=100
+TARGET_LEVERAGE=4
+MAX_CONCURRENT_TRADES=1
+MAX_TOTAL_GROSS_NOTIONAL_USD=200
+MAX_NOTIONAL_PER_VENUE_USD=100
+MAX_NOTIONAL_PER_ASSET_USD=200
+RV_WINDOW_MINUTES=60
+BASIS_VOL_WINDOW_MINUTES=60
+VOL_PERCENTILE_LOOKBACK_DAYS=1
+VOL_MIN_OBSERVATIONS=500
+MIN_EXPECTED_NET_EDGE_BPS=10
+MAX_ALLOWED_SLIPPAGE_BPS=5
+MIN_REQUIRED_BOOK_DEPTH_MULTIPLIER=5
+MAX_MARKET_DATA_AGE_MS=3000
+MAX_DELTA_IMBALANCE_USD=50
+MAX_DELTA_IMBALANCE_RATIO=0.05
+DELTA_HEDGE_TIMEOUT_MS=10000
+MIN_LIQUIDATION_DISTANCE_PCT=1
+MAX_MARGIN_UTILIZATION_PCT=80
+NORMAL_EXIT_POLICY=edge_decay
+ADMIN_API_TOKEN=<a long random string, for the kill switch>
+```
+
+These are the paper defaults made explicit, with the size cut to $100 per side. At $100 a side some coins cannot be
+traded (BTC's minimum order on several venues is worth more than one $100 slice); the bot then simply skips them.
+
+**5. Start the bot** as usual. The startup alert and `/health` (`live:<venue>` entries) show which venues are ready; the
+dashboard header turns red if one is not. The kill switch (`/admin/pause-new-entries`, `/admin/emergency-flatten` with
+the `X-Admin-Token` header) works the same as in paper mode.
+
+**Known limits.** MEXC and BloFin leave a few order details undocumented (MEXC's market-order price field and one-way
+side codes, BloFin's position units). The bot follows the documentation and the ccxt library, and the live leg compares
+the venue's position with its own fills after every order: a mismatch stops the trade (DEGRADED) instead of trading on
+wrong numbers. If you want the first live trade on the venues with complete documentation, give keys to Binance, Bybit and
+Bitget first. Funding is read from the venue every 10 minutes. Research ("shadow") trials stay paper-only.

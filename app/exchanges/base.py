@@ -1,8 +1,9 @@
 """ExchangeAdapter: the one interface strategy, execution and risk code use for a venue (section 16).
 
-Exchange-specific semantics stay inside adapters. Phase 3 implements the PUBLIC (market data) half.
-The account/order half raises ExchangeNotSupported until Phase 8 (testnet) so that nothing can place
-an order by accident. Paper mode never touches the order half of a real adapter.
+Exchange-specific semantics stay inside adapters. These adapters implement the PUBLIC (market data) half only:
+their account/order methods raise ExchangeNotSupported, so nothing can place an order through them by accident.
+Paper mode wraps them in PaperVenue; live mode wraps them in LiveVenue together with the venue's SIGNED client
+(app/exchanges/private), which is the only code that can place a real order.
 """
 
 from abc import ABC, abstractmethod
