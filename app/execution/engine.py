@@ -99,6 +99,8 @@ class ActiveTrade:
     gate_wait: str | None = None  # why the next entry slice is waiting (spread rule / volatility), None = not waiting
     gate_next_check: datetime | None = None
     entry_stop: str | None = None  # why the entry should end early with what it holds (edge decayed / max hold)
+    stale_since: datetime | None = None  # start of the current stale-data episode (slices are paused meanwhile)
+    stale_alerted: bool = False
 
     @property
     def legs(self) -> tuple[Leg, Leg]:
@@ -113,6 +115,10 @@ MAX_CLEANUP_ATTEMPTS = 5
 STALE_BOOK_RETRY_SECONDS = 0.5
 # A venue that misses a cycle keeps its last price for the open-trade valuation this long, labelled with its age.
 LAST_KNOWN_PRICE_MAX_AGE = timedelta(minutes=5)
+# Stale data pauses slices at once, but the WARNING waits until the episode has lasted this long. Live 2026-10-02:
+# MEXC's cached snapshots crossed the 3 s limit for a single cycle about every 8 minutes (133 warnings in 17 h, each
+# cleared by the next cycle), which buried the alerts that needed attention.
+STALE_ALERT_AFTER = timedelta(seconds=30)
 
 
 class TradeEngine:
@@ -449,6 +455,8 @@ class TradeEngine:
 
     async def _apply(self, active: ActiveTrade, state: TradeState, decision: RiskDecision, obs: Observation) -> None:
         a = decision.action
+        if a is not RiskAction.PAUSE_SLICES:
+            active.stale_since = None  # the stale episode (if any) is over
 
         # ---- most urgent first
         if a is RiskAction.EMERGENCY_EXIT:
@@ -473,9 +481,15 @@ class TradeEngine:
         elif a is RiskAction.NORMAL_EXIT and state is S.HEDGED_OPEN:
             await self._begin_exit(active, "normal", active.exit_reason or "normal_exit")
         elif a is RiskAction.PAUSE_SLICES:
-            if active.action_changed:  # once when data goes stale, not again every 5 s while it stays stale
+            now = self.clock.now()
+            if active.stale_since is None:
+                active.stale_since, active.stale_alerted = now, False
+            # once per episode, and only for an episode that outlasts a blip (slices are paused from the first cycle)
+            if not active.stale_alerted and now - active.stale_since >= STALE_ALERT_AFTER:
+                active.stale_alerted = True
                 await self.notifier.alert("stale_direct_data",
-                                          "market data stale: no new slices (" + ", ".join(decision.reasons) + ")",
+                                          f"market data stale for {(now - active.stale_since).total_seconds():.0f} s: "
+                                          "no new slices (" + ", ".join(decision.reasons) + ")",
                                           severity="warning", trade_id=active.id)
             if state is not S.EXITING:
                 return

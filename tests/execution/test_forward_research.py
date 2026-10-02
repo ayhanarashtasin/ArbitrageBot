@@ -427,8 +427,12 @@ def test_a_stale_looking_book_is_fetched_once_more_but_really_stale_data_still_b
     assert obs.data_age_ms["short"] <= w.params.max_market_data_age_ms  # the retry was fresh
     calls["always_stale"] = True
     before = len(w.alerts("stale_direct_data"))
-    for _ in range(5):
+    for _ in range(4):  # a 20 s blip: slices pause at once, but it is not worth a warning
         w.clock.advance(seconds=5)
         decision = w.step()[a.id]
         assert decision.action.value == "PAUSE_SLICES"  # still blocked: the data really is old
-    assert len(w.alerts("stale_direct_data")) - before == 1  # one alert for the whole stale episode
+    assert len(w.alerts("stale_direct_data")) == before
+    for _ in range(6):
+        w.clock.advance(seconds=5)
+        assert w.step()[a.id].action.value == "PAUSE_SLICES"
+    assert len(w.alerts("stale_direct_data")) - before == 1  # one alert for the whole stale episode, after 30 s

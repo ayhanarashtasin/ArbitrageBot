@@ -119,7 +119,8 @@ Saved-pick windows overlap between sweeps; their estimates are repeated observat
 - **Health means healthy.** The engine is green only when its loop completed and no trade is DEGRADED, RECONCILING,
   in ERROR or waiting for a human; health details and alerts show the first line of the error.
 - **Stale data.** A book older than `MAX_MARKET_DATA_AGE_MS` is fetched once more before it counts as stale (MEXC
-  sometimes serves a cached snapshot); data that stays old still pauses trading, with one alert per episode. Keep the
+  sometimes serves a cached snapshot); data that stays old still pauses slices at once, with one alert per episode that lasts 30 s or more
+  (MEXC's single-cycle blips no longer each raise a warning). Keep the
   PC clock synchronised: a clock that runs ahead makes every venue's data look older than it is.
 - **An entry always ends.** The per-slice gates can postpone slices for hours, so an entry still unfinished after
   `MAX_ENTRY_HOURS` (12 h, twice the locked TWAP) stops and keeps what it holds, and an entry whose funding edge has
