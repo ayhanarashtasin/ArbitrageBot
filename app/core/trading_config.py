@@ -77,6 +77,10 @@ DESIGN_DEFAULTS: dict[str, tuple[object, str]] = {
     "normal_exit_edge_floor_bps_per_hour": (D(0), "exit when net funding per hour is at or below this"),
     "normal_exit_confirm_minutes": (60, "the decay must persist this long before exiting"),
     "max_hold_hours": (168, "hard cap on holding time under edge_decay"),
+    # Live 2026-10-02: the per-slice spread and volatility gates held AERO at 6 of 10 slices for 44 h after its funding
+    # edge had gone to zero, and nothing ended the entry. After this long the entry keeps what it has and the normal
+    # exit rules (edge decay, max hold) decide whether the reduced position stays open.
+    "max_entry_hours": (12, "an entry still unfinished after this long (twice the locked 6 h TWAP) stops and keeps what it holds"),
     "normal_exit_duration_minutes": (120, "paired TWAP reduction time for a normal exit"),
     # One sweep cycle is about 7 min of sweeping plus the 15 min pause: a shorter limit would leave the one-minute watch
     # blocked on "Zero Delta data stale" for part of every cycle while the direct venue data is perfectly fresh.
@@ -161,6 +165,7 @@ class ResolvedParams(BaseModel):
     normal_exit_edge_floor_bps_per_hour: Decimal
     normal_exit_confirm_minutes: int
     max_hold_hours: int
+    max_entry_hours: int
     normal_exit_duration_minutes: int
     zero_delta_max_age_seconds: int
     zero_delta_mismatch_tolerance_per_hour: Decimal
@@ -237,6 +242,7 @@ class TradingSettings(BaseSettings):
     normal_exit_edge_floor_bps_per_hour: Decimal | None = None
     normal_exit_confirm_minutes: int | None = None
     max_hold_hours: int | None = None
+    max_entry_hours: int | None = None
     normal_exit_duration_minutes: int | None = None
     zero_delta_max_age_seconds: int | None = None
     zero_delta_mismatch_tolerance_per_hour: Decimal | None = None
@@ -344,9 +350,11 @@ class TradingSettings(BaseSettings):
             data[name] = value
         params = ResolvedParams(**data, provenance=provenance)
         for name in ("target_notional_per_leg_usd", "target_leverage", "paper_account_equity_multiple",
-                     "watch_interval_seconds", "scan_interval_seconds", "max_hold_hours"):
+                     "watch_interval_seconds", "scan_interval_seconds", "max_hold_hours", "max_entry_hours"):
             if getattr(params, name) <= 0:
                 raise ValueError(f"{name.upper()} must be positive")
+        if params.max_entry_hours * 60 < params.twap_entry_duration_minutes:
+            raise ValueError("MAX_ENTRY_HOURS cannot be shorter than the locked 6 h entry TWAP")
         if not 2 <= params.earnings_blackout_days <= 3:
             raise ValueError("EARNINGS_BLACKOUT_DAYS must be 2 or 3")
         if params.target_leverage / params.paper_account_equity_multiple > params.max_allowed_leverage:

@@ -467,6 +467,7 @@ const divBar = (v, max) => { if (v == null || !max) return `<div class="div-bar"
   const w = Math.min(50, Math.abs(v) / max * 50); return `<div class="div-bar" aria-hidden="true"><i class="${v >= 0 ? "p" : "n"}" style="width:${w}%"></i></div>`; };
 
 /* ---------- state ---------- */
+const ENTRY_STOP = {entry_time_limit: "time limit reached", edge_decayed: "funding edge gone", max_hold_reached: "maximum hold reached"};
 const NAV = [["overview", "Overview", "house"], ["trades", "Trades", "arrows-left-right"], ["plan", "The plan", "target"], ["scanner", "Scanner", "scan"],
   ["market", "Market", "chart-bar"], ["decisions", "Decisions", "list-checks"], ["settings", "Settings", "gear-six"]];
 const TITLES = Object.fromEntries(NAV.map(([k, t]) => [k, t]));
@@ -651,7 +652,7 @@ function renderTrade() {
       <div class="line total"><span>Net profit</span><span class="num ${cls(mm.net)}">${signMoney(mm.net)}</span></div></div></div>
     <div class="card"><h2 style="margin-bottom:10px">Entry progress</h2><div class="chart-cap"><span>${filled} of ${planned} slices on each leg</span><b>${planned ? Math.round(filled / planned * 100) : 0}%</b></div>
       <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="${planned}" aria-valuenow="${filled}" aria-label="Entry slices filled"><i style="width:${planned ? Math.min(100, filled / planned * 100) : 0}%"></i></div>
-      <dl class="kv mt"><dt>Opened</dt><dd>${dt(d.opened_at)}</dd><dt>Slice size</dt><dd>${d.entry_plan?.slice_qty?.[0] ?? "n/a"} ${esc(d.asset)} ≈ ${money(d.entry_plan ? d.entry_plan.child : null)}</dd><dt>Time in trade</dt><dd>${dur((tm.entry_seconds || 0) + (tm.hold_seconds || 0) + (tm.exit_seconds || 0))}</dd></dl></div></div>`);
+      <dl class="kv mt">${d.entry_stopped ? `<dt>Entry ended early</dt><dd>${esc(ENTRY_STOP[d.entry_stopped.reason] || d.entry_stopped.reason)}, kept ${d.entry_stopped.slices_done} of ${planned}</dd>` : ""}<dt>Opened</dt><dd>${dt(d.opened_at)}</dd><dt>Slice size</dt><dd>${d.entry_plan?.slice_qty?.[0] ?? "n/a"} ${esc(d.asset)} ≈ ${money(d.entry_plan ? d.entry_plan.child : null)}</dd><dt>Time in trade</dt><dd>${dur((tm.entry_seconds || 0) + (tm.hold_seconds || 0) + (tm.exit_seconds || 0))}</dd></dl></div></div>`);
   setHTML($("td-tabs"), TABS.map(([k, t]) => `<button type="button" role="tab" id="tab-${k}" aria-selected="${ui.tab === k}" aria-controls="td-panel" tabindex="${ui.tab === k ? 0 : -1}" data-tab="${k}">${t}</button>`).join(""));
   $("td-panel").setAttribute("aria-labelledby", "tab-" + ui.tab);
   setHTML($("td-panel"), ui.tab === "charts" ? tradeCharts(d) : ui.tab === "why" ? entryReason(d) : ui.tab === "activity" ? tradeActivity(d) : tradeSummary(d));

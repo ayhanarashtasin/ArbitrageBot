@@ -98,6 +98,7 @@ class ActiveTrade:
     entry_delay: timedelta = field(default_factory=timedelta)  # how far waiting slices pushed the schedule back
     gate_wait: str | None = None  # why the next entry slice is waiting (spread rule / volatility), None = not waiting
     gate_next_check: datetime | None = None
+    entry_stop: str | None = None  # why the entry should end early with what it holds (edge decayed / max hold)
 
     @property
     def legs(self) -> tuple[Leg, Leg]:
@@ -419,10 +420,14 @@ class TradeEngine:
             active.delta_unsafe_since = None
 
         normal_signal = False
-        if state is S.HEDGED_OPEN and obs.net_funding_per_hour is not None:
+        # The edge-decay monitor also watches entries: a position whose edge has gone must stop growing. The same
+        # monitor carries on once the entry ends, so the normal exit then follows from the same evidence.
+        if state in (S.HEDGED_OPEN, S.ENTERING) and obs.net_funding_per_hour is not None:
             sig = active.monitor.update(now, active.opened_at, obs.net_funding_per_hour)
-            if sig:
+            if sig and state is S.HEDGED_OPEN:
                 normal_signal, active.exit_reason = True, sig.reason
+            elif sig:
+                active.entry_stop = sig.reason
 
         decision = evaluate(await self._risk_inputs(active, obs, normal_signal), self.params)
         if self.kill.emergency_flatten and decision.action is not RiskAction.EMERGENCY_EXIT:
@@ -529,9 +534,19 @@ class TradeEngine:
             return "negative_spread_within_2h_funding"
         return None
 
+    def _entry_overdue(self, active: ActiveTrade, now: datetime) -> str | None:
+        return "entry_time_limit" if now - active.opened_at >= timedelta(hours=self.params.max_entry_hours) else None
+
     async def _entry_step(self, active: ActiveTrade, obs: Observation | None = None) -> None:
         now = self.clock.now()
-        if active.unresolved or not self.kill.entries_allowed:
+        if active.unresolved:
+            return  # entry work is paused until every order's state is known; risk management continues
+        # Ending an entry sends no order, so it is allowed even while the kill switch pauses new entries.
+        stop = active.entry_stop or self._entry_overdue(active, now)
+        if stop is not None:
+            await self._finish_entry(active, stopped=stop)
+            return
+        if not self.kill.entries_allowed:
             return  # entry work is paused, risk management continues
         plan = active.entry_plan
         idx = active.entry_done if active.entry_done < plan.slices else None
@@ -598,7 +613,9 @@ class TradeEngine:
         if active.entry_done >= active.entry_plan.slices and now >= active.entry_plan.end + active.entry_delay:
             await self._finish_entry(active)
 
-    async def _finish_entry(self, active: ActiveTrade) -> None:
+    async def _finish_entry(self, active: ActiveTrade, stopped: str | None = None) -> None:
+        """End the entry. `stopped` = it ends before its plan did (time limit or decayed edge) and keeps what it holds;
+        from HEDGED_OPEN the normal exit rules then decide whether that reduced position stays open."""
         delta = await active.executor.delta()
         if active.executor.flat(delta):
             await self._begin_exit(active, "normal", "no_fills")  # nothing was hedged: close the record
@@ -606,8 +623,18 @@ class TradeEngine:
             return
         if active.executor.unsafe(delta):
             return  # stay in ENTERING; the risk engine keeps trying to repair delta
-        self._set(active, S.HEDGED_OPEN, "entry complete and delta safe")
-        await self.notifier.alert("entry_completed", f"hedged: long ${delta.long_usd:.2f} short ${delta.short_usd:.2f}",
+        note = ""
+        if stopped is None:
+            self._set(active, S.HEDGED_OPEN, "entry complete and delta safe")
+        else:
+            kept = f"{active.entry_done}/{active.entry_plan.slices}"
+            self._set(active, S.HEDGED_OPEN, f"entry stopped early ({stopped}): kept {kept} slices")
+            self.repo.merge_context(active.id, entry_stopped={"reason": stopped, "slices_done": active.entry_done,
+                                                              "at": self.clock.now().isoformat()})
+            note = f"; entry stopped early ({stopped}), kept {kept} slices"
+        active.entry_stop = None
+        await self.notifier.alert("entry_completed",
+                                  f"hedged: long ${delta.long_usd:.2f} short ${delta.short_usd:.2f}{note}",
                                   trade_id=active.id)
 
     async def _heal(self, active: ActiveTrade, state: TradeState, *, entry: bool) -> None:

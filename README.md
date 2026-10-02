@@ -121,6 +121,13 @@ Saved-pick windows overlap between sweeps; their estimates are repeated observat
 - **Stale data.** A book older than `MAX_MARKET_DATA_AGE_MS` is fetched once more before it counts as stale (MEXC
   sometimes serves a cached snapshot); data that stays old still pauses trading, with one alert per episode. Keep the
   PC clock synchronised: a clock that runs ahead makes every venue's data look older than it is.
+- **An entry always ends.** The per-slice gates can postpone slices for hours, so an entry still unfinished after
+  `MAX_ENTRY_HOURS` (12 h, twice the locked TWAP) stops and keeps what it holds, and an entry whose funding edge has
+  decayed (the normal-exit edge rule) stops at once. From there the normal exit rules decide whether the reduced
+  position stays open; an entry that never filled is simply closed. (Live: AERO once sat 44 h at 6 of 10 slices with
+  zero edge, holding a research slot.)
+- **One slow venue cannot freeze the others.** Open trades are stepped together, venue connections stay open for 60 s
+  (the default 5 s made every cycle reconnect) and a connect that has not completed in 3 s is retried.
 - **Crypto is never held to the earnings calendar.** A venue's own contract label (Binance, Gate, Bitget) decides the
   asset class; venues that list crypto next to stocks (Ondo Perps, Lighter on Robinhood) only decide for unlabelled coins.
 - In paper mode, blank `REQUIRED_BEFORE_LIVE` values use **labelled paper defaults** (`app/core/trading_config.py`).

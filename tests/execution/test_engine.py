@@ -35,7 +35,10 @@ class World:
         kw = dict(target_notional_per_leg_usd=500, min_expected_net_edge_bps=1, entry_slice_gates=False)
         kw.update(settings_kw or {})
         self.params = TradingSettings(_env_file=None, **kw).resolve()
-        self.src = sources or {"L": FakeSource("L", 100, clock=self.clock), "S": FakeSource("S", 100, clock=self.clock)}
+        # The short leg earns a small funding edge, as every selected pair does when it is entered: with no edge at all
+        # the edge-decay monitor (which also watches entries) would rightly stop the entry after an hour.
+        self.src = sources or {"L": FakeSource("L", 100, clock=self.clock),
+                               "S": FakeSource("S", 100, clock=self.clock, rate_per_hour="0.0001")}
         self.kill = KillSwitch(self.clock)
         self.notifier = Notifier(self.repo)
         self.provider = PaperVenueProvider(self.src.get, self.clock, self.repo)
@@ -55,10 +58,10 @@ class World:
         e = engine or self.engine
         return run(e.run_once())
 
-    def advance_and_step(self, n, minutes=0, seconds=0):
+    def advance_and_step(self, n, minutes=0, seconds=0, hours=0):
         last = None
         for _ in range(n):
-            self.clock.advance(minutes=minutes, seconds=seconds)
+            self.clock.advance(hours=hours, minutes=minutes, seconds=seconds)
             last = self.step()
         return last
 
@@ -573,3 +576,53 @@ def test_a_hanging_venue_on_one_trade_does_not_freeze_the_other_trades():
         assert set(results) == {first.id, second.id} and first.last_obs is not None
 
     run(scenario())
+
+
+# ---- an entry always ends ----------------------------------------------------------------------
+# Live 2026-10-02: AERO sat at 6 of 10 slices for 44 h with a funding edge of zero, holding one of the three research
+# slots, because nothing ended an entry that the per-slice gates kept postponing.
+
+def test_an_entry_that_overruns_its_time_limit_keeps_what_it_holds():
+    w = World()
+    w.open()
+    w.step()
+    w.advance_and_step(1, minutes=72)  # slice 1
+    done = w.engine.active["arb0001"].entry_done
+    assert done == 2
+    w.kill.pause("op", "stand-in for gates that keep postponing every slice")
+    w.advance_and_step(1, hours=w.params.max_entry_hours)
+    assert w.state() is TradeState.HEDGED_OPEN
+    t = w.repo.get_trade("arb0001")
+    assert t.context["entry_stopped"]["reason"] == "entry_time_limit" and t.context["entry_stopped"]["slices_done"] == 2
+    assert len(w.repo.orders_for("arb0001")) == 2 * done  # nothing was added on the way out
+    assert any("entry stopped early (entry_time_limit), kept 2/5 slices" in a.message
+               for a in w.alerts("entry_completed"))
+
+
+def test_an_entry_whose_edge_decays_stops_growing_and_then_exits_normally():
+    w = World()
+    w.open()
+    w.step()
+    w.src["S"].rate_per_hour = D(0)  # the funding edge is gone
+    for _ in range(10):
+        w.advance_and_step(1, minutes=10)
+        if w.state() is TradeState.HEDGED_OPEN:
+            break
+    assert w.state() is TradeState.HEDGED_OPEN
+    assert w.repo.get_trade("arb0001").context["entry_stopped"]["reason"] == "edge_decayed"
+    assert w.engine.active["arb0001"].entry_done < w.engine.active["arb0001"].entry_plan.slices
+    for _ in range(30):
+        w.advance_and_step(1, minutes=10)
+        if w.state() is TradeState.CLOSED:
+            break
+    assert w.state() is TradeState.CLOSED and w.repo.get_trade("arb0001").exit_reason == "edge_decayed"
+
+
+def test_an_entry_that_never_filled_is_closed_at_its_time_limit():
+    w = World()
+    w.open()
+    w.kill.pause("op", "no slice is ever allowed")
+    w.step()
+    w.advance_and_step(1, hours=w.params.max_entry_hours)
+    assert w.state() is TradeState.CLOSED and w.repo.get_trade("arb0001").exit_reason == "no_fills"
+    assert w.repo.orders_for("arb0001") == []

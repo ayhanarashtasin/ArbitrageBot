@@ -403,7 +403,7 @@ def trade_detail(rt: Runtime, trade_id: str) -> dict[str, Any]:
                    "long_exit": _avg_price(orders, "long", True), "short_exit": _avg_price(orders, "short", True)},
         "decision": ctx.get("decision"),
         "entry_snapshot": _entry_snapshot(t, rt.repo.funding_observations(trade_id)),
-        "entry_plan": ctx.get("entry_plan"), "exit": ctx.get("exit"),
+        "entry_plan": ctx.get("entry_plan"), "entry_stopped": ctx.get("entry_stopped"), "exit": ctx.get("exit"),
         "equity": [{"at": _iso(e.recorded_at), "long_ratio": _f(e.long_ratio), "short_ratio": _f(e.short_ratio),
                     "net_delta_usd": _f(e.net_delta_usd)} for e in eq],
         "slices": [{"phase": s.phase, "index": s.slice_index, "status": s.status,

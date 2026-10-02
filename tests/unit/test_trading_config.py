@@ -98,3 +98,12 @@ def test_api_keys_do_not_enable_live(monkeypatch):
 def test_scan_assets_comma_separated(monkeypatch):
     monkeypatch.setenv("SCAN_ASSETS", "btc, eth")
     assert TradingSettings(_env_file=None).scan_assets == ["BTC", "ETH"]
+
+
+def test_an_entry_time_limit_shorter_than_the_locked_twap_is_refused():
+    from app.core.trading_config import TradingSettings
+
+    assert TradingSettings(_env_file=None).resolve().max_entry_hours == 12
+    with pytest.raises(ValueError, match="MAX_ENTRY_HOURS"):
+        TradingSettings(_env_file=None, max_entry_hours=5).resolve()
+    assert TradingSettings(_env_file=None, max_entry_hours=6).resolve().max_entry_hours == 6
