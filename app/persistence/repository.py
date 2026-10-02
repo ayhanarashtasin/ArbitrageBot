@@ -75,6 +75,11 @@ class Repository:
         if file_sqlite:
             event.listen(self.engine, "connect", _sqlite_wal)
         m.Base.metadata.create_all(self.engine)
+        # create_all builds indexes only for tables it creates. An index added to an existing table later (live
+        # 2026-10-02: the time indexes behind the per-sweep prune) must be created on databases that already exist.
+        for table in m.Base.metadata.sorted_tables:
+            for index in table.indexes:
+                index.create(self.engine, checkfirst=True)
         self._sessions = sessionmaker(self.engine, expire_on_commit=False)
         self.clock = clock
         # Database outage handling: writes are buffered in order and replayed when the database returns,
@@ -111,6 +116,14 @@ class Repository:
         scanner used add() for these rows, so one locked write aborted a whole sweep's selection and verification.
         """
         self.add(model, **fields)
+
+    def record_many(self, rows: list[tuple[type, dict[str, Any]]]) -> None:
+        """Like record(), for many rows in ONE transaction. The scanner writes about 4,200 discovery rows per sweep;
+        one commit each meant one disk flush each, all on the event loop that also runs the trades."""
+        if not rows:
+            return
+        with self.session() as s:
+            s.add_all([model(**fields) for model, fields in rows])
 
     def audit(self, kind: str, data: dict, trade_id: str | None = None) -> None:
         self.add(m.AuditLog, trade_id=trade_id, kind=kind, data=_json_safe(data), recorded_at=self.clock.now())
@@ -496,7 +509,7 @@ def _get_kv(self: Repository, key: str) -> dict | None:
 
 Repository.set_kv = _resilient(_set_kv)  # type: ignore[method-assign]
 Repository.get_kv = _get_kv  # type: ignore[method-assign]
-for _name in ("record", "audit", "add_decision", "mark_alert_delivered", "add_risk_event", "add_provider_event", "update_trade",
+for _name in ("record", "record_many", "audit", "add_decision", "mark_alert_delivered", "add_risk_event", "add_provider_event", "update_trade",
               "merge_context", "upsert_leg", "record_slice", "upsert_order", "add_fill", "add_equity_snapshot",
               "add_position_snapshot", "add_funding_payment", "save_paper_account", "release_lease", "set_state"):
     setattr(Repository, _name, _resilient(getattr(Repository, _name)))

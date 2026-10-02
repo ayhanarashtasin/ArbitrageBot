@@ -4,6 +4,7 @@ Zero Delta is a discovery and research source. Nothing here places orders, and a
 opportunity alone must never trigger one (project.md section 4).
 """
 
+import asyncio
 import time
 from decimal import Decimal
 from datetime import UTC, datetime
@@ -150,7 +151,8 @@ class ZeroDeltaProvider:
 
     async def fetch_asset(self, asset: str, days: int | None = None, keep_days: int | None = None) -> AssetAnalysis:
         payload = await self._get_client().post_dash(asset_payload(asset, self._settings))
-        return self.analyze_response(payload, asset, days=days, keep_days=keep_days)
+        # Parsing 14 days of hourly history for ~30 venues takes 60-120 ms for a big coin: done off the event loop.
+        return await asyncio.to_thread(self.analyze_response, payload, asset, days=days, keep_days=keep_days)
 
     async def list_assets(self) -> list[AssetInfo]:
         """Every coin Zero Delta lists (its coin table), most liquid first."""

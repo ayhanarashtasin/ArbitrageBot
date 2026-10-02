@@ -189,3 +189,26 @@ def test_file_database_uses_wal_so_an_outside_reader_never_blocks_the_bot(tmp_pa
     assert repo.db_ok and repo.backlog_size == 0
     with repo.session() as s:
         assert [e.message for e in s.query(m.ZeroDeltaProviderEvent)] == ["first", "while read", "buffered", "after"]
+
+
+def test_time_indexes_are_added_to_an_existing_database_and_used_by_the_prune(tmp_path):
+    """Live 2026-10-02: the per-sweep prune scanned two 321k-row tables in full (~0.6 s each, on the event loop)
+    because received_at / recorded_at had no index, and create_all never adds an index to an existing table."""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    Repository(f"sqlite:///{path}", ManualClock(T0)).engine.dispose()
+    con = sqlite3.connect(path)
+    con.execute("DROP INDEX ix_zerodelta_markets_received_at")  # a database made before the index existed
+    con.commit()
+    con.close()
+
+    repo = Repository(f"sqlite:///{path}", ManualClock(T0))
+    repo.engine.dispose()
+    con = sqlite3.connect(path)
+    names = {r[1] for r in con.execute("PRAGMA index_list(zerodelta_markets)")}
+    assert "ix_zerodelta_markets_received_at" in names
+    plan = " ".join(str(r) for r in con.execute(
+        "EXPLAIN QUERY PLAN DELETE FROM zerodelta_markets WHERE received_at < '2026-09-29 00:00:00'"))
+    assert "ix_zerodelta_markets_received_at" in plan
+    con.close()

@@ -264,3 +264,30 @@ def test_engine_loop_survives_a_failing_iteration():
 
     snap = run(go())
     assert snap["ok"] is False and snap["detail"] == "RuntimeError: boom"  # the cause is visible, not just its type
+
+
+def test_a_coins_discovery_rows_are_one_write_and_are_buffered_during_an_outage():
+    """Live 2026-10-02: ~4,200 discovery rows per sweep were committed one by one on the event loop."""
+    from app.persistence import models as m
+    w = World()
+    now = w.clock.now()
+    rows = [(m.ZeroDeltaProviderEvent, dict(kind="OK", message=f"row {i}", recorded_at=now)) for i in range(3)]
+    commits = {"n": 0}
+    real = w.repo.session
+
+    @contextlib.contextmanager
+    def counting():
+        commits["n"] += 1
+        with real() as s:
+            yield s
+
+    w.repo.session = counting
+    w.repo.record_many(rows)
+    w.repo.session = real
+    assert commits["n"] == 1
+    with database_down(w.repo):
+        w.repo.record_many(rows)  # never raises: buffered like every other scanner write
+    assert w.repo.backlog_size == 1 and not w.repo.db_ok
+    w.repo.flush_backlog()
+    with w.repo.session() as s:
+        assert s.query(m.ZeroDeltaProviderEvent).count() == 6

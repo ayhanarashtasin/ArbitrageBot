@@ -34,8 +34,8 @@ class Base(DeclarativeBase):
     pass
 
 
-def _ts() -> Mapped[datetime]:
-    return mapped_column(DateTime(timezone=True))
+def _ts(index: bool = False) -> Mapped[datetime]:
+    return mapped_column(DateTime(timezone=True), index=index)
 
 
 class Venue(Base):
@@ -69,7 +69,7 @@ class ZeroDeltaMarket(Base):
     avg_24h_volume_usd: Mapped[Decimal] = mapped_column(DecimalString)
     eligible: Mapped[bool] = mapped_column(Boolean)
     reasons: Mapped[list] = mapped_column(JSON, default=list)
-    received_at: Mapped[datetime] = _ts()
+    received_at: Mapped[datetime] = _ts(index=True)  # indexed: old rows are pruned by time after every sweep
 
 
 class ZeroDeltaObservation(Base):
@@ -93,7 +93,7 @@ class ZeroDeltaHistory(Base):
     venue_name: Mapped[str] = mapped_column(String(64))
     coverage: Mapped[dict] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(24))
-    recorded_at: Mapped[datetime] = _ts()
+    recorded_at: Mapped[datetime] = _ts(index=True)  # indexed: old rows are pruned by time after every sweep
 
 
 class ZeroDeltaCandidate(Base):
@@ -112,7 +112,7 @@ class ZeroDeltaProviderEvent(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     kind: Mapped[str] = mapped_column(String(48))  # AUTH_FAILURE, OUTAGE, STALE, MALFORMED, OK
     message: Mapped[str] = mapped_column(Text)
-    recorded_at: Mapped[datetime] = _ts()
+    recorded_at: Mapped[datetime] = _ts(index=True)  # indexed: old rows are pruned by time after every sweep
 
 
 class Opportunity(Base):
@@ -144,7 +144,7 @@ class Selection(Base):
 
     __tablename__ = "selections"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_at: Mapped[datetime] = _ts()
+    run_at: Mapped[datetime] = _ts(index=True)  # indexed: picks due for their week-later score are found by time every sweep
     kind: Mapped[str] = mapped_column(String(12), index=True)  # overall | tradable
     rank: Mapped[int] = mapped_column(Integer)
     asset: Mapped[str] = mapped_column(String(16), index=True)

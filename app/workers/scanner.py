@@ -164,17 +164,21 @@ class Scanner:
     def _persist_discovery(self, analysis: AssetAnalysis, pairs: list[PairAnalytics]) -> None:
         now = self.clock.now()
         from app.persistence import models as m
+        rows: list[tuple[type, dict]] = []
         for mk in analysis.markets:
             s = mk.snapshot
-            self.repo.record(m.ZeroDeltaMarket, asset=analysis.asset, venue_name=s.venue_name,
-                          venue_type=s.venue_type.value, market_identifier=s.market_identifier,
-                          funding_rate_raw=s.funding_rate_raw, funding_interval_hours=s.funding_interval_hours,
-                          normalized_funding_rate_per_hour=s.normalized_funding_rate_per_hour,
-                          avg_24h_volume_usd=s.avg_24h_volume_usd, eligible=mk.eligible,
-                          reasons=list(mk.reasons), received_at=analysis.received_at)
+            rows.append((m.ZeroDeltaMarket, dict(
+                asset=analysis.asset, venue_name=s.venue_name, venue_type=s.venue_type.value,
+                market_identifier=s.market_identifier, funding_rate_raw=s.funding_rate_raw,
+                funding_interval_hours=s.funding_interval_hours,
+                normalized_funding_rate_per_hour=s.normalized_funding_rate_per_hour,
+                avg_24h_volume_usd=s.avg_24h_volume_usd, eligible=mk.eligible, reasons=list(mk.reasons),
+                received_at=analysis.received_at)))
             if mk.coverage is not None:
-                self.repo.record(m.ZeroDeltaHistory, asset=analysis.asset, venue_name=s.venue_name,
-                              coverage=mk.coverage.model_dump(mode="json"), status=mk.coverage.status, recorded_at=now)
+                rows.append((m.ZeroDeltaHistory, dict(
+                    asset=analysis.asset, venue_name=s.venue_name, coverage=mk.coverage.model_dump(mode="json"),
+                    status=mk.coverage.status, recorded_at=now)))
+        self.repo.record_many(rows)  # one transaction per coin, not one per row
 
     # ---- direct verification ------------------------------------------------------------------
     def _leg_fee(self, adapter: ExchangeAdapter) -> tuple[Decimal, bool]:
@@ -284,6 +288,14 @@ class Scanner:
                 keep.append(p)
         return keep
 
+    def _candidate_pairs(self, analysis: AssetAnalysis, newest: datetime | None
+                         ) -> tuple[list[PairAnalytics], list[PairAnalytics]]:
+        """(pairs now, the same coin's pairs one week earlier). Reads only its arguments: safe in a worker thread."""
+        pairs = [p for p in generate_pairs(analysis, self.zd_settings) if p.status == "OK" and p.stats]
+        earlier = [p for p in generate_pairs(analysis, self.zd_settings, as_of=newest - WEEK)
+                   if p.status == "OK" and p.stats] if newest else []
+        return pairs, earlier
+
     async def _discover(self, asset: str):
         """Every possible pair for one coin with its 7-day funding analytics, straight from Zero Delta.
 
@@ -295,10 +307,10 @@ class Scanner:
         if analysis is None:
             report.zero_delta_ok, report.note = False, detail or "Zero Delta unavailable"
             return report, None, [], [], (reason, detail)
-        pairs = [p for p in generate_pairs(analysis, self.zd_settings) if p.status == "OK" and p.stats]
         newest = self._newest(analysis)
-        earlier = [p for p in generate_pairs(analysis, self.zd_settings, as_of=newest - WEEK)
-                   if p.status == "OK" and p.stats] if newest else []
+        # Pure computation, 0.3-0.4 s per run for BTC or ETH (measured live): in a worker thread, so the event loop
+        # that also runs the trades and the API is not held for it (two big coins at once paused it ~2 s per sweep).
+        pairs, earlier = await asyncio.to_thread(self._candidate_pairs, analysis, newest)
         self._persist_discovery(analysis, pairs)
         report.pairs_found = len(pairs)
         report.total_markets = len(analysis.markets)
