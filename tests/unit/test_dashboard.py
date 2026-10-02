@@ -342,3 +342,22 @@ def test_selection_is_empty_before_the_first_scan_and_the_page_has_the_plan_sect
     assert c.get("/api/selection").json() == {}
     html = c.get("/dashboard").text
     assert "identify, select, simulate" in html and "/api/selection" in html and "renderPlan" in html
+
+
+def test_a_trial_that_closed_before_the_current_selection_is_history_not_the_picks_result():
+    """Live 2026-10-02: US was picked again a day after its trial closed, and the plan showed that old trial as the new
+    pick's forward result."""
+    from app.persistence.models import Trade
+    rig = Rig()
+    rig.scan()  # opens arb0001
+    rig.engine.active.clear()
+    with rig.repo.session() as s:
+        t = s.get(Trade, "arb0001")
+        t.state, t.closed_at = "CLOSED", rig.clock.now()
+    rig.clock.advance(minutes=20)
+    for src in rig.src.values():
+        src.candle_closes = wild_closes()  # the new pick waits: no new trial
+    rig.scan()
+    c, _ = make(rig)
+    row = c.get("/api/selection").json()["tradable"][0]
+    assert row["forward"]["status"] == "waiting" and row["forward"]["previous_trial"]["trade_id"] == "arb0001"

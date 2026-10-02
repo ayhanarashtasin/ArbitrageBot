@@ -135,16 +135,22 @@ def selection(rt: Runtime) -> dict[str, Any]:
     if not out:
         return {}
     trials = rt.repo.all_trades()
+    made_at = datetime.fromisoformat(out["at"]) if out.get("at") else None
     for kind in ("overall", "tradable"):
         for row in out.get(kind, []):
             matches = [t for t in trials if (t.asset, t.long_venue, t.short_venue) ==
                        (row["asset"], row["long"], row["short"])]
             if matches:
                 t = matches[-1]
+                trial = {"status": t.state, "trade_id": t.id, "shadow": bool((t.context or {}).get("shadow")),
+                         "net": _pnl_numbers(rt, t)["net"]}
+                if t.closed_at is not None and made_at is not None and as_utc(t.closed_at) < made_at:
+                    # Live 2026-10-02: US was picked again a day after its trial closed and the plan showed that old
+                    # trial as the new pick's result. A trial that ended before this selection is only history.
+                    row["forward"] = {**(row.get("forward") or {}), "previous_trial": trial}
+                    continue
                 active = rt.engine.active.get(t.id)
-                row["forward"] = {"status": t.state, "trade_id": t.id, "shadow": bool((t.context or {}).get("shadow")),
-                                  "net": _pnl_numbers(rt, t)["net"],
-                                  "entry_wait": active.gate_wait if active else None}
+                row["forward"] = {**trial, "entry_wait": active.gate_wait if active else None}
     out["track_record"] = rt.repo.selection_track_record()
     return out
 
