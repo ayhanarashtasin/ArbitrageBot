@@ -17,8 +17,11 @@ mexcdevelop.github.io/apidocs/contract_v1_en for the signing sample.
 - GET position/open_positions (holdVol contracts, positionType 1 long 2 short, state 1 holding), account/asset/USDT,
   position/position_mode (2 = one-way), POST position/change_leverage, account/tiered_fee_rate/v2,
   position/funding_records (funding positive = received), order/list/open_orders, order/cancel_with_external.
-Undocumented details (market price field, one-way side codes, cancel body shape) follow the ccxt library; the first
-live order on MEXC is checked against the venue's position by the live leg, which stops the trade on any mismatch.
+Cross-checked against the ccxt library (2026-10-02), which trades this API live: the same signing, no price on market
+orders, the same one-way side codes and no reduceOnly flag, order lookups and cancels by venue order id. One deliberate
+difference: ccxt sends market orders as type 6 ("convert to the current price", which can rest like a limit order);
+the bot uses the documented type 5 (market), so a hedge leg never waits unfilled. The live leg still checks the venue's
+position against its own fills after every order.
 """
 
 import hashlib
@@ -70,6 +73,7 @@ class MexcPrivate(PrivateClient):
         self._key, self._secret = creds.key, creds.secret.encode()
         self._http = SignedHttp(self.name, base_url, self._sign, transport=transport)
         self._leverage: dict[str, int] = {}  # symbol -> leverage set by prepare_symbol (orders must repeat it)
+        self._order_ids: dict[str, str] = {}  # client order id -> venue order id (lookups and cancels use the id)
 
     def _sign(self, method: str, path: str, query: str, body: str) -> tuple[dict[str, str], str]:
         ts = str(self.now_ms())
@@ -172,14 +176,15 @@ class MexcPrivate(PrivateClient):
     async def place_market_order(self, meta: InstrumentMeta, side: Side, quantity: Decimal, *, client_order_id: str,
                                  reduce_only: bool) -> str:
         contracts = to_contracts(meta, quantity)
+        # As ccxt sends it in one-way mode: the closing side codes (2, 4) can only reduce, so no reduceOnly flag.
         body = {"symbol": meta.symbol, "vol": int(contracts), "side": SIDE_CODE[(side, reduce_only)], "type": 5,
                 "openType": 1, "externalOid": client_order_id, "positionMode": 2}
-        if reduce_only:
-            body["reduceOnly"] = True
-        else:
+        if not reduce_only:
             body["leverage"] = await self._order_leverage(meta)
         data = await self._call("POST", "/api/v1/private/order/create", body=body, order=True)
-        return str(data.get("orderId") if isinstance(data, dict) else data)
+        order_id = str(data.get("orderId") if isinstance(data, dict) else data)
+        self._order_ids[client_order_id] = order_id
+        return order_id
 
     def _order(self, o: dict, meta: InstrumentMeta) -> OrderState:
         state, filled = int(o.get("state") or 0), _d(o.get("dealVol")) * meta.contract_multiplier
@@ -194,10 +199,20 @@ class MexcPrivate(PrivateClient):
                           reduce_only=int(o.get("side") or 1) in (2, 4), received_at=datetime.now(UTC))
 
     async def get_order(self, meta: InstrumentMeta, client_order_id: str) -> OrderState:
-        data = await self._call("GET", f"/api/v1/private/order/external/{meta.symbol}/{client_order_id}", lookup=True)
+        """By venue order id when it is known (the endpoint ccxt uses), by client id only when it is not (a lost
+        reply or a restart): the documented external-id lookup."""
+        order_id = self._order_ids.get(client_order_id)
+        if order_id:
+            data = await self._call("GET", f"/api/v1/private/order/get/{order_id}", lookup=True)
+        else:
+            data = await self._call("GET", f"/api/v1/private/order/external/{meta.symbol}/{client_order_id}",
+                                    lookup=True)
         if not data:
             raise OrderNotFound(f"{self.name}: no order {client_order_id}")
-        return self._order(data, meta)
+        state = self._order(data, meta)
+        if state.order_id:
+            self._order_ids[client_order_id] = state.order_id
+        return state if state.client_order_id else state.model_copy(update={"client_order_id": client_order_id})
 
     def _fill(self, f: dict, meta: InstrumentMeta) -> PrivateFill:
         side = Side.BUY if int(f.get("side") or 1) in (1, 2) else Side.SELL
@@ -218,8 +233,15 @@ class MexcPrivate(PrivateClient):
         return [self._fill(f, meta) for f in rows if f.get("symbol", meta.symbol) == meta.symbol]
 
     async def cancel_order(self, meta: InstrumentMeta, client_order_id: str) -> None:
-        await self._call("POST", "/api/v1/private/order/cancel_with_external",
-                         body={"symbol": meta.symbol, "externalOid": client_order_id}, order=True, lookup=True)
+        """POST order/cancel with a list of venue order ids (the body shape ccxt uses; the external-id cancel's body
+        differs between the old and new docs)."""
+        try:
+            state = await self.get_order(meta, client_order_id)
+        except OrderNotFound:
+            return
+        if state.status in (OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED) or not state.order_id:
+            return
+        await self._call("POST", "/api/v1/private/order/cancel", body=[state.order_id], order=True, lookup=True)
 
     async def fee_schedule(self, meta: InstrumentMeta) -> FeeSchedule:
         r = await self._call("GET", "/api/v1/private/account/tiered_fee_rate/v2", {"symbol": meta.symbol}) or {}

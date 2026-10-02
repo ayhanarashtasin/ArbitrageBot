@@ -264,13 +264,18 @@ def test_mexc_orders_are_in_contracts_with_one_way_side_codes():
     assert go(c.place_market_order(m, Side.SELL, D("0.0123"), client_order_id=CID, reduce_only=False)) == "777"
     assert rec.body() == {"symbol": "BTC_USDT", "vol": 123, "side": 3, "type": 5, "openType": 1, "externalOid": CID,
                           "positionMode": 2, "leverage": 4}
-    go(c.place_market_order(m, Side.BUY, D("0.0123"), client_order_id=CID, reduce_only=True))
-    assert rec.body()["side"] == 2 and rec.body()["reduceOnly"] is True and "leverage" not in rec.body()
-    rec = Recorder({"success": True, "code": 0, "data": {"orderId": "777", "symbol": "BTC_USDT", "externalOid": CID,
-                                                         "side": 3, "state": 3, "vol": 123, "dealVol": 123,
-                                                         "dealAvgPrice": 60000}})
-    o = go(client(MexcPrivate, rec).get_order(m, CID))
+    filled = {"success": True, "code": 0, "data": {"orderId": "777", "symbol": "BTC_USDT", "externalOid": CID,
+                                                   "side": 3, "state": 3, "vol": 123, "dealVol": 123,
+                                                   "dealAvgPrice": 60000}}
+    rec.responses = [filled]
+    o = go(c.get_order(m, CID))  # the venue order id is known: looked up by id, as ccxt does
     assert o.status is OrderStatus.FILLED and o.filled_quantity == D("0.0123") and o.side is Side.SELL
+    assert rec.requests[-1].url.path == "/api/v1/private/order/get/777"
+    rec.responses = [{"success": True, "code": 0, "data": {"orderId": "778", "ts": 1}}]
+    go(c.place_market_order(m, Side.BUY, D("0.0123"), client_order_id="arb0007-x0000-S-a01", reduce_only=True))
+    assert rec.body()["side"] == 2 and "reduceOnly" not in rec.body() and "leverage" not in rec.body()
+    rec = Recorder(filled)
+    go(client(MexcPrivate, rec).get_order(m, CID))  # after a restart only the client id is known
     assert rec.requests[0].url.path == f"/api/v1/private/order/external/BTC_USDT/{CID}"
     with pytest.raises(OrderNotFound):
         go(client(MexcPrivate, Recorder({"success": False, "code": 2040, "message": "no"})).get_order(m, CID))

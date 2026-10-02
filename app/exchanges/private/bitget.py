@@ -80,7 +80,8 @@ class BitgetPrivate(PrivateClient):
 
     async def _call(self, method: str, path: str, params: dict[str, Any] | None = None, *, body: dict | None = None,
                     order: bool = False, lookup: bool = False) -> Any:
-        resp = await self._http.request(method, path, params=params, body=body, order=order)
+        resp = await self._http.request(method, path, params=params, body=body, order=order,
+                                        sort_params=True)  # sorted, as the ccxt library signs Bitget queries
         data = json_body(self.name, resp, f"{method} {path}")
         code = str(data.get("code")) if isinstance(data, dict) else None
         if code is None:

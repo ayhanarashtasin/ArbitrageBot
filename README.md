@@ -280,8 +280,10 @@ traded (BTC's minimum order on several venues is worth more than one $100 slice)
 dashboard header turns red if one is not. The kill switch (`/admin/pause-new-entries`, `/admin/emergency-flatten` with
 the `X-Admin-Token` header) works the same as in paper mode.
 
-**Known limits.** MEXC and BloFin leave a few order details undocumented (MEXC's market-order price field and one-way
-side codes, BloFin's position units). The bot follows the documentation and the ccxt library, and the live leg compares
-the venue's position with its own fills after every order: a mismatch stops the trade (DEGRADED) instead of trading on
-wrong numbers. If you want the first live trade on the venues with complete documentation, give keys to Binance, Bybit and
-Bitget first. Funding is read from the venue every 10 minutes. Research ("shadow") trials stay paper-only.
+**How the clients were verified.** Each signed client follows the venue's official documentation; Binance's signing
+matches its published test vector, and the signing and order formats of all five were cross-checked against the ccxt
+library, which trades these APIs live (it also settles the details MEXC and BloFin leave undocumented: MEXC market orders
+carry no price and use side codes 1/3 to open and 2/4 to close; BloFin positions are in contracts). A signature can only be
+proven with a real key: the first `live_check` run does that without trading. The live leg also compares the venue's
+position with its own fills after every order, so any surprise stops the trade (DEGRADED) instead of trading on wrong
+numbers. Funding is read from the venue every 10 minutes. Research ("shadow") trials stay paper-only.

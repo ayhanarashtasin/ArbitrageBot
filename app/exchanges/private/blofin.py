@@ -17,8 +17,10 @@ Verified against the official docs (docs.blofin.com, 2026-10-02):
   /api/v1/account/funding-fees (7-day window; positive = received), POST /api/v1/trade/cancel-order (needs orderId),
   GET /api/v1/user/query-apikey (readOnly 0 = read-write).
 - The account fee rate is not published by the API: fees use the configured standard tier (labelled unverified).
-Undocumented details (position units, fee sign) are cross-checked at run time by the live leg, which compares the
-venue's position with its own fills after every order and stops the trade on any mismatch.
+Cross-checked against the ccxt library (2026-10-02), which trades this API live: the same signing (Base64 of the hex
+digest), order size in contracts, positions in contracts (signed in net mode, times contractValue), fees positive when
+paid and charged in the settlement coin. The live leg still checks the venue's position against its own fills after
+every order.
 """
 
 import base64
