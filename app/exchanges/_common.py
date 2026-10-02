@@ -32,6 +32,14 @@ from .base import ExchangeAdapter, ExchangeError, ExchangeRequestError
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 10.0
+# Connecting gets far less time than reading. Measured live 2026-10-02: from this network about one in four NEW TCP
+# connections to Binance's CloudFront edge never completed (SYN lost; every other venue 10/10), and each one held the
+# trade cycle for the full 10 s before the retry. A healthy connect takes 20-150 ms, so 3 s only cuts off dead ones.
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 3.0
+# httpx closes an idle connection after 5 s by default. The engine polls each venue every 5-15 s, so it reconnected
+# on almost every cycle and met the lost-connect problem above each time. Measured side by side at a 5 s cadence:
+# 5 s keep-alive -> 12 of 40 requests hung, 60 s keep-alive -> 1 of 46.
+DEFAULT_KEEPALIVE_EXPIRY_SECONDS = 60.0
 MAX_RETRIES_CAP = 2  # hard upper bound; a larger max_retries is a programming error
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_BACKOFF_SECONDS = 0.5  # doubles per retry: 0.5s, 1.0s
@@ -179,7 +187,9 @@ class PublicHttp:
         self._sleep = sleep
         self._http = httpx.AsyncClient(
             base_url=base_url,
-            timeout=timeout,
+            timeout=httpx.Timeout(timeout, connect=min(timeout, DEFAULT_CONNECT_TIMEOUT_SECONDS)),
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20,
+                                keepalive_expiry=DEFAULT_KEEPALIVE_EXPIRY_SECONDS),
             transport=transport,
             headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
         )

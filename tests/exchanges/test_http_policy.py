@@ -145,3 +145,19 @@ def test_client_errors_other_than_rate_limits_are_not_retried(cls, read, ok):
     with pytest.raises(ExchangeRequestError, match="HTTP 400"):
         h.run(cls, sequence(httpx.Response(400, text="bad request")), read)
     assert len(h.calls) == 1 and h.sleeps == []
+
+
+def test_connections_are_kept_open_and_dead_connects_fail_fast():
+    """Live 2026-10-02: httpx's 5 s keep-alive made every engine cycle reconnect to Binance, and lost connects then
+    held the cycle for the full 10 s. Connections now stay open 60 s and a connect gets at most 3 s."""
+    import asyncio
+
+    p = PublicHttp("x", "https://example.invalid")
+    try:
+        assert p._http.timeout.connect == 3.0 and p._http.timeout.read == 10.0
+        assert p._http._transport._pool._keepalive_expiry == 60.0
+        short = PublicHttp("y", "https://example.invalid", timeout=1.0)
+        assert short._http.timeout.connect == 1.0  # never longer than the overall timeout
+        asyncio.run(short.aclose())
+    finally:
+        asyncio.run(p.aclose())
