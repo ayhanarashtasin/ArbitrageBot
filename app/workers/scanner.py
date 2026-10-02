@@ -62,6 +62,12 @@ TRADFI_VENUE_HINTS = frozenset({"Trade.xyz", "Ondo Perps", "Ligher on RH"})
 PRICE_SOURCES = ("Binance USDT", "Bybit USDT", "Hyperliquid", "OKX", "Gate", "MEXC USDT", "BloFin USDT", "Bitget")
 
 
+
+def scan_stale_seconds(params: ResolvedParams) -> float:
+    """A sweep reports once per cycle (several minutes of sweeping plus the pause): two cycles and a margin. Sweep
+    health older than this is stale, and a venue-pair entry this old no longer describes a pair the bot uses."""
+    return 2 * params.scan_interval_seconds + 1800.0
+
 @dataclass
 class ScanReport:
     asset: str
@@ -142,7 +148,7 @@ class Scanner:
     async def _zd_failure(self, kind: str, message: str) -> None:
         self.repo.add_provider_event(kind.upper(), message)
         if self.health:
-            self.health.mark("zero_delta", False, kind)
+            self.health.mark("zero_delta", False, kind, stale_after=scan_stale_seconds(self.params))
         if self._zd_alerted != kind:  # one alert per distinct failure until it recovers
             self._zd_alerted = kind
             await self.notifier.alert(kind, message + " | new opportunities stopped; open trades keep running",
@@ -216,11 +222,12 @@ class Scanner:
             # one pair must never abort the verification of the others (a Bybit candle cap once did exactly that)
             log.warning("verification of %s/%s failed: %s", pair.long_leg.venue_name, pair.short_leg.venue_name, exc)
             if self.health:
-                self.health.mark(f"venue:{pair.long_leg.venue_name}/{pair.short_leg.venue_name}", False, str(exc))
+                self.health.mark(f"venue:{pair.long_leg.venue_name}/{pair.short_leg.venue_name}", False, str(exc),
+                                 expire_after=scan_stale_seconds(self.params))
             return None
         if self.health:
             self.health.mark(f"venue:{pair.long_leg.venue_name}/{pair.short_leg.venue_name}", True,
-                             "direct venue data fetched successfully")
+                             "direct venue data fetched successfully", expire_after=scan_stale_seconds(self.params))
         vol: VolScore = low_vol_score(long_c, short_c, rv_window=self.params.rv_window_minutes,
                                       basis_window=self.params.basis_vol_window_minutes,
                                       min_observations=self.params.vol_min_observations)
@@ -634,7 +641,8 @@ class Scanner:
             self._zd_alerted = None
             self.repo.add_provider_event("OK", f"sweep: {ok} of {attempted} coins scanned")
             if self.health:
-                self.health.mark("zero_delta", True, f"last sweep ok ({ok} coins)")
+                self.health.mark("zero_delta", True, f"last sweep ok ({ok} coins)",
+                                 stale_after=scan_stale_seconds(self.params))
 
         total_pairs = sum(r.pairs_found for r in reports.values())
         if found:
@@ -671,7 +679,8 @@ class Scanner:
         }
         self.progress = {**self.progress, "running": False, "finished_at": finished.isoformat()}
         if self.health and ok:
-            self.health.mark("scanner", True, f"{ok} coins, {total_pairs} pairs, {self.sweep['opened']} opened")
+            self.health.mark("scanner", True, f"{ok} coins, {total_pairs} pairs, {self.sweep['opened']} opened",
+                             stale_after=scan_stale_seconds(self.params))
         try:
             self.repo.prune_discovery()
         except Exception:  # noqa: BLE001 - housekeeping must never break a scan

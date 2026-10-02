@@ -17,10 +17,13 @@ from app.domain.trade import TradeState
 from app.execution.engine import TradeEngine
 from app.notifications.notifier import Notifier
 from app.persistence.repository import Repository
-from app.workers.scanner import Scanner
+from app.workers.scanner import Scanner, scan_stale_seconds
 
 log = logging.getLogger(__name__)
 ERROR_ALERT_EVERY_SECONDS = 300
+# The engine loop reports every 1-15 s; three minutes of silence means it is stuck, not slow.
+ENGINE_STALE_SECONDS = 180.0
+
 # Trade states that mean "not healthy right now": the engine health turns red and names the trade.
 UNHEALTHY_TRADE_STATES = frozenset({TradeState.DEGRADED, TradeState.RECONCILING, TradeState.ERROR,
                                     TradeState.MANUAL_INTERVENTION_REQUIRED})
@@ -55,8 +58,9 @@ class Runner:
                        f"{len(provenance)} parameters use paper defaults")
         manual = await self.engine.recover()
         self.scanner.restore_watch()
-        self.health.mark("database", True, "ok")
-        self.health.mark("engine", not manual, "manual intervention needed" if manual else "recovered")
+        self.mark_database_health()
+        self.health.mark("engine", not manual, "manual intervention needed" if manual else "recovered",
+                         stale_after=ENGINE_STALE_SECONDS)
         return manual
 
     async def _guard(self, name: str, coro) -> bool:
@@ -68,7 +72,7 @@ class Runner:
             raise
         except Exception as exc:  # noqa: BLE001 - the loop must survive
             log.exception("%s iteration failed", name)
-            self.health.mark(name, False, _brief(exc))
+            self.health.mark(name, False, _brief(exc), stale_after=self._stale_after(name))
             if time.monotonic() - self._last_error_alert > ERROR_ALERT_EVERY_SECONDS:
                 self._last_error_alert = time.monotonic()
                 await self.notifier.alert("critical_error", f"{name} failed: {_brief(exc)}", severity="critical")
@@ -85,14 +89,32 @@ class Runner:
                     if self.engine.state_of(t) in UNHEALTHY_TRADE_STATES]
         detail = f"{len(self.engine.active)} active trades"
         if troubled:
-            self.health.mark("engine", False, detail + "; not healthy: " + ", ".join(troubled))
+            self.health.mark("engine", False, detail + "; not healthy: " + ", ".join(troubled),
+                             stale_after=ENGINE_STALE_SECONDS)
         else:
-            self.health.mark("engine", True, detail)
+            self.health.mark("engine", True, detail, stale_after=ENGINE_STALE_SECONDS)
+
+    def mark_database_health(self) -> None:
+        """The database as the repository sees it right now (it was marked "ok" once at startup and never again)."""
+        if self.repo.db_ok:
+            self.health.mark("database", True, "ok", stale_after=ENGINE_STALE_SECONDS)
+        else:
+            self.health.mark("database", False, f"unavailable: {self.repo.backlog_size} writes buffered, trading "
+                             "continues from memory", stale_after=ENGINE_STALE_SECONDS)
+
+    def _stale_after(self, name: str) -> float:
+        """How long each loop may stay silent before its health turns red (a hung loop must not stay green)."""
+        if name == "watch":
+            return 10 * self.params.watch_interval_seconds
+        if name == "scanner":
+            return scan_stale_seconds(self.params)
+        return ENGINE_STALE_SECONDS
 
     async def engine_loop(self) -> None:
         while not self._stop.is_set():
             if await self._guard("engine", self.engine.run_once()):
                 self.mark_engine_health()
+            self.mark_database_health()
             await self._sleep(self.engine.recommended_delay())
 
     async def scan_loop(self) -> None:
@@ -100,13 +122,17 @@ class Runner:
             if self.engine.kill.entries_allowed and not self.engine.blocked():
                 assets = await self.scanner.resolve_assets(self.settings.scan_assets, self.settings.exclude_assets)
                 await self._guard("scanner", self.scanner.scan_all(assets))
+            else:  # paused on purpose: say so, rather than let the last sweep's report go stale and red
+                self.health.mark("scanner", True, "not scanning: new entries are paused or blocked",
+                                 stale_after=scan_stale_seconds(self.params))
             await self._sleep(self.params.scan_interval_seconds)
 
     async def watch_loop(self) -> None:
         while not self._stop.is_set():
             if await self._guard("watch", self.scanner.recheck_watch()):
                 # without this, one failed re-check left the watch (and overall health) red forever
-                self.health.mark("watch", True, f"{len(self.scanner.watch)} selected pairs waiting")
+                self.health.mark("watch", True, f"{len(self.scanner.watch)} selected pairs waiting",
+                                 stale_after=self._stale_after("watch"))
             await self._sleep(self.params.watch_interval_seconds)
 
     async def _sleep(self, seconds: float) -> None:
