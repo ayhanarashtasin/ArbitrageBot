@@ -51,7 +51,7 @@ PAPER_DEFAULTS: dict[str, tuple[object, str]] = {
     "target_leverage": (D(4), "the task spec: leverage 4x (each side's account holds notional / 4, see paper_account_equity_multiple)"),
     "rv_window_minutes": (60, "one hour of 1-minute returns"),
     "basis_vol_window_minutes": (60, "matches the realised-volatility window"),
-    "vol_percentile_lookback_days": (1, "about 1 day of 1-minute data is available from one REST call"),
+    "vol_percentile_lookback_days": (1, "1 day requested; one REST call returns at most 999 one-minute candles (Bybit's cap, applied to every venue), so the window is about 16.6 h"),
     "vol_min_observations": (500, "rolling-window samples needed before a percentile is trusted"),
     "min_expected_net_edge_bps": (D(10), "of one leg's notional, after fees, slippage and basis cost"),
     "max_allowed_slippage_bps": (D(5), "per child slice, per leg"),

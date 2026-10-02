@@ -42,8 +42,8 @@ def test_components_without_limits_keep_their_last_report():
 
 
 def test_database_health_follows_the_repository_not_the_startup_mark():
-    from tests.chaos.test_chaos import Rig, World
     from app.workers.runner import Runner
+    from tests.chaos.test_chaos import Rig, World
 
     w = World()
     runner = Runner(settings=None, params=w.params, repo=w.repo, engine=w.engine, scanner=Rig().scanner,

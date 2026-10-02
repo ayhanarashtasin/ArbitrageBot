@@ -271,7 +271,7 @@ def test_a_coins_discovery_rows_are_one_write_and_are_buffered_during_an_outage(
     from app.persistence import models as m
     w = World()
     now = w.clock.now()
-    rows = [(m.ZeroDeltaProviderEvent, dict(kind="OK", message=f"row {i}", recorded_at=now)) for i in range(3)]
+    rows = [(m.ZeroDeltaProviderEvent, {"kind": "OK", "message": f"row {i}", "recorded_at": now}) for i in range(3)]
     commits = {"n": 0}
     real = w.repo.session
 

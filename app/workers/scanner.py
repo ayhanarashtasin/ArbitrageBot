@@ -167,17 +167,18 @@ class Scanner:
         rows: list[tuple[type, dict]] = []
         for mk in analysis.markets:
             s = mk.snapshot
-            rows.append((m.ZeroDeltaMarket, dict(
-                asset=analysis.asset, venue_name=s.venue_name, venue_type=s.venue_type.value,
-                market_identifier=s.market_identifier, funding_rate_raw=s.funding_rate_raw,
-                funding_interval_hours=s.funding_interval_hours,
-                normalized_funding_rate_per_hour=s.normalized_funding_rate_per_hour,
-                avg_24h_volume_usd=s.avg_24h_volume_usd, eligible=mk.eligible, reasons=list(mk.reasons),
-                received_at=analysis.received_at)))
+            rows.append((m.ZeroDeltaMarket, {
+                "asset": analysis.asset, "venue_name": s.venue_name, "venue_type": s.venue_type.value,
+                "market_identifier": s.market_identifier, "funding_rate_raw": s.funding_rate_raw,
+                "funding_interval_hours": s.funding_interval_hours,
+                "normalized_funding_rate_per_hour": s.normalized_funding_rate_per_hour,
+                "avg_24h_volume_usd": s.avg_24h_volume_usd, "eligible": mk.eligible, "reasons": list(mk.reasons),
+                "received_at": analysis.received_at}))
             if mk.coverage is not None:
-                rows.append((m.ZeroDeltaHistory, dict(
-                    asset=analysis.asset, venue_name=s.venue_name, coverage=mk.coverage.model_dump(mode="json"),
-                    status=mk.coverage.status, recorded_at=now)))
+                rows.append((m.ZeroDeltaHistory, {
+                    "asset": analysis.asset, "venue_name": s.venue_name,
+                    "coverage": mk.coverage.model_dump(mode="json"), "status": mk.coverage.status,
+                    "recorded_at": now}))
         self.repo.record_many(rows)  # one transaction per coin, not one per row
 
     # ---- direct verification ------------------------------------------------------------------
