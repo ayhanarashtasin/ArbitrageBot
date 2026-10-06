@@ -117,6 +117,9 @@ class LiveVenue(ExchangeAdapter):
     async def get_candles(self, symbol: str, timeframe: str = "1m", limit: int = 200) -> list[Candle]:
         return await self._src.get_candles(symbol, timeframe, limit)
 
+    async def get_closed_candles(self, symbol: str, timeframe: str = "1m", limit: int = 200) -> list[Candle]:
+        return await self._src.get_closed_candles(symbol, timeframe, limit)
+
     async def get_fee_schedule(self, symbol: str) -> FeeSchedule:
         return await self._private.fee_schedule(self.meta)
 

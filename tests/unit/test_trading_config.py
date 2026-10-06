@@ -36,6 +36,8 @@ def test_paper_resolves_with_labelled_defaults():
     assert p.provenance["target_leverage"] == "paper_default"
     assert p.provenance["max_allowed_leverage"] == "locked"
     assert p.target_leverage <= p.max_allowed_leverage == 4
+    assert p.low_vol_max_percentile == 60
+    assert p.funding_screening_horizon_minutes == 480
 
 
 def test_explicit_values_are_marked_explicit():
@@ -54,7 +56,8 @@ def test_target_leverage_cannot_exceed_locked_cap():
     ("twap_entry_duration_minutes", 120), ("controlled_exit_equity_ratio", "0.5"),
     ("emergency_exit_equity_ratio", "0.2"), ("controlled_exit_duration_minutes", 60),
     ("emergency_exit_target_seconds", 30), ("funding_screening_horizon_minutes", 60),
-    ("twap_max_child_notional_usd", 150), ("low_vol_max_percentile", 60),
+    ("funding_screening_horizon_minutes", 120),
+    ("twap_max_child_notional_usd", 150), ("low_vol_max_percentile", 61),
 ])
 def test_locked_values_cannot_be_loosened(field, value):
     with pytest.raises(ValueError):
@@ -107,3 +110,11 @@ def test_an_entry_time_limit_shorter_than_the_locked_twap_is_refused():
     with pytest.raises(ValueError, match="MAX_ENTRY_HOURS"):
         TradingSettings(_env_file=None, max_entry_hours=5).resolve()
     assert TradingSettings(_env_file=None, max_entry_hours=6).resolve().max_entry_hours == 6
+
+
+def test_exclude_venues_is_comma_separated_and_checked(monkeypatch):
+    monkeypatch.setenv("EXCLUDE_VENUES", "BloFin, Bitget")
+    assert TradingSettings(_env_file=None).exclude_venues == ["BloFin", "Bitget"]
+    monkeypatch.setenv("EXCLUDE_VENUES", "bolfin")
+    with pytest.raises(ValueError, match="not a supported venue"):
+        TradingSettings(_env_file=None)

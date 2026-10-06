@@ -24,8 +24,50 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from app.strategy.pairs import PairAnalytics
+from app.providers.zerodelta.models import SummaryBatch
+from itertools import combinations
 
 APR = Decimal(8760)
+
+
+def screen_summary(batch: SummaryBatch, assets: set[str] | None, excluded: set[str], min_volume: Decimal,
+                   count: int, source_for_venue: Callable) -> list[dict]:
+    """Provisional pair spreads. Half the budget is reserved for executable venues; diversify before backfill."""
+    grouped = {}
+    for m in batch.markets:
+        if m.coin not in excluded and (assets is None or m.coin in assets) and m.avg_volume_usd > min_volume:
+            if m.avg_apr_7d is not None:
+                grouped.setdefault(m.coin, []).append(m)
+    candidates = []
+    for coin, markets in grouped.items():
+        for a, b in combinations(markets, 2):
+            low, high = sorted((a, b), key=lambda m: (m.avg_apr_7d, m.exchange))
+            edge = high.avg_apr_7d - low.avg_apr_7d
+            if edge <= 0 or low.venue_name == high.venue_name:
+                continue
+            ls, ss = source_for_venue(low.venue_name), source_for_venue(high.venue_name)
+            candidates.append({"asset": coin, "long": low.venue_name, "short": high.venue_name,
+                "long_exchange": low.exchange, "short_exchange": high.exchange,
+                "provisional_apr": float(edge), "executable": ls is not None and ss is not None and ls is not ss})
+    candidates.sort(key=lambda p: (-p["provisional_apr"], p["asset"], p["long_exchange"], p["short_exchange"]))
+
+    def diversified(rows):
+        seen, first, rest = set(), [], []
+        for r in rows:
+            (rest if r["asset"] in seen else first).append(r)
+            seen.add(r["asset"])
+        return first + rest
+
+    tradable = diversified([p for p in candidates if p["executable"]])[:count // 2]
+    out, keys = [], set()
+    for p in tradable + diversified(candidates):
+        key = (p["asset"], p["long_exchange"], p["short_exchange"])
+        if key not in keys:
+            keys.add(key)
+            out.append(p)
+        if len(out) == count:
+            break
+    return sorted(out, key=lambda p: (-p["provisional_apr"], p["asset"], p["long_exchange"], p["short_exchange"]))
 
 
 @dataclass(frozen=True)

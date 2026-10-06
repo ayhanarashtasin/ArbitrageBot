@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import Counter
 from abc import abstractmethod
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
@@ -185,6 +186,11 @@ class PublicHttp:
         self._max_retries = max_retries
         self._backoff = backoff_seconds
         self._sleep = sleep
+        self._counts = Counter()
+        self._errors = Counter()
+        self._statuses = Counter()
+        self._last_request_ms = 0.0
+        self._total_request_ms = 0.0
         self._http = httpx.AsyncClient(
             base_url=base_url,
             timeout=httpx.Timeout(timeout, connect=min(timeout, DEFAULT_CONNECT_TIMEOUT_SECONDS)),
@@ -205,16 +211,42 @@ class PublicHttp:
         return await self._request("POST", path, json_body=body)
 
     async def _request(self, method: str, path: str, *, params=None, json_body=None) -> Any:
+        started = time.monotonic()
+        self._counts["requests"] += 1
+        try:
+            return await self._read(method, path, params=params, json_body=json_body)
+        except ExchangeRequestError as exc:
+            self._counts["failed_requests"] += 1
+            log.warning("%s: %s %s request failed after %.0fms: %s", self._venue, method, path,
+                        (time.monotonic() - started) * 1000, exc)
+            raise
+        finally:
+            self._last_request_ms = (time.monotonic() - started) * 1000
+            self._total_request_ms += self._last_request_ms
+
+    def diagnostics(self) -> dict:
+        """Bounded counters for this process; no URLs, symbols, credentials or response bodies."""
+        return {**dict(self._counts), "errors": dict(self._errors), "http_statuses": dict(self._statuses),
+                "last_request_ms": round(self._last_request_ms, 1),
+                "total_request_ms": round(self._total_request_ms, 1)}
+
+    async def _read(self, method: str, path: str, *, params=None, json_body=None) -> Any:
         venue = self._venue
         attempts = self._max_retries + 1
         for attempt in range(attempts):
             last = attempt == attempts - 1
+            started = time.monotonic()
+            self._counts["attempts"] += 1
             try:
                 resp = await self._http.request(method, path, params=params, json=json_body)
             except httpx.TimeoutException as exc:
+                reason = type(exc).__name__
+                self._errors[reason] += 1
                 if last:
-                    raise ExchangeRequestError(f"{venue}: request timed out ({method} {path})") from exc
+                    raise ExchangeRequestError(f"{venue}: request timed out ({reason}) ({method} {path})") from exc
             except httpx.TransportError as exc:
+                reason = type(exc).__name__
+                self._errors[reason] += 1
                 if last:
                     raise ExchangeRequestError(
                         f"{venue}: connection failed ({type(exc).__name__}) ({method} {path})"
@@ -225,6 +257,8 @@ class PublicHttp:
                 ) from exc
             else:
                 status = resp.status_code
+                self._statuses[str(status)] += 1
+                reason = f"HTTP {status}"
                 if status in (418, 429):
                     retry_after = resp.headers.get("Retry-After", "")
                     hint = f"; venue asks to wait {retry_after}s" if retry_after.isdigit() else ""
@@ -239,6 +273,7 @@ class PublicHttp:
                         f"on {method} {path}{'; ' + detail if detail else ''}; not retried"
                     )
                 if status >= 500 or status == 408:  # 408: Binance "backend response timeout"
+                    self._errors[reason] += 1
                     if last:
                         raise ExchangeRequestError(f"{venue}: server error (HTTP {status}) on {method} {path}")
                 elif status != 200:
@@ -248,12 +283,17 @@ class PublicHttp:
                     )
                 else:
                     try:
-                        return json.loads(resp.content, parse_float=Decimal)
+                        result = json.loads(resp.content, parse_float=Decimal)
                     except ValueError as exc:
                         raise ExchangeRequestError(f"{venue}: malformed JSON from {method} {path}") from exc
+                    if attempt:
+                        self._counts["recovered_requests"] += 1
+                        log.info("%s: %s %s recovered on attempt %d/%d", venue, method, path, attempt + 1, attempts)
+                    return result
             delay = self._backoff * (2**attempt)
-            log.warning("%s: %s %s failed, retry %d/%d in %.1fs", venue, method, path, attempt + 1,
-                        attempts - 1, delay)
+            self._counts["retries"] += 1
+            log.warning("%s: %s %s failed (%s, %.0fms), retry %d/%d in %.1fs", venue, method, path, reason,
+                        (time.monotonic() - started) * 1000, attempt + 1, attempts - 1, delay)
             await self._sleep(delay)
         raise AssertionError("unreachable")  # pragma: no cover
 
@@ -320,6 +360,37 @@ class PublicMarketDataAdapter(ExchangeAdapter):
             backoff_seconds=backoff_seconds, sleep=sleep,
         )
         self._instruments = InstrumentCache(self._load_instruments, instrument_ttl_seconds, clock)
+        self._candle_cache: dict[tuple, tuple[int, list]] = {}
+        self._candle_reads: dict[tuple, asyncio.Task] = {}
+
+    async def get_closed_candles(self, symbol: str, timeframe: str = "1m", limit: int = 200):
+        """Share closed-candle reads only until the next candle boundary. Never caches executable books."""
+        seconds = TIMEFRAME_MS.get(timeframe, 60_000) / 1000
+        bucket = int(self._now().timestamp() // seconds)
+        key = (symbol, timeframe, limit)
+        cached = self._candle_cache.get(key)
+        if cached is not None and cached[0] == bucket:
+            return list(cached[1])
+
+        async def load():
+            values = await self.get_candles(symbol, timeframe, limit)
+            if values and values[-1].open_time.timestamp() + seconds == bucket * seconds:
+                self._candle_cache[key] = (bucket, list(values))
+                while len(self._candle_cache) > 64:
+                    self._candle_cache.pop(next(iter(self._candle_cache)))
+            return values
+
+        read_key = (*key, bucket)
+        task = self._candle_reads.get(read_key)
+        if task is None or task.done():
+            task = self._candle_reads[read_key] = asyncio.create_task(load())
+            def finished(done):
+                if self._candle_reads.get(read_key) is done:
+                    self._candle_reads.pop(read_key, None)
+                if not done.cancelled():
+                    done.exception()  # retrieves failures even if every waiting scan was cancelled
+            task.add_done_callback(finished)
+        return list(await asyncio.shield(task))
 
     @abstractmethod
     async def _load_instruments(self) -> list[InstrumentMeta]: ...
@@ -329,6 +400,11 @@ class PublicMarketDataAdapter(ExchangeAdapter):
         return await self._instruments.get()
 
     async def close(self) -> None:
+        tasks = list(self._candle_reads.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._candle_reads.clear()
         await self._http.aclose()
 
     async def __aenter__(self):

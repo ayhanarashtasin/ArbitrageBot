@@ -9,6 +9,7 @@ import pytest
 from app.core.clock import ManualClock
 from app.core.trading_config import TradingSettings
 from app.domain.trade import TradeState
+from app.exchanges.base import ExchangeRequestError
 from app.execution.engine import TradeEngine
 from app.execution.venue_provider import PaperVenueProvider, UnsupportedVenue, VenueProvider
 from app.notifications.notifier import Notifier
@@ -489,14 +490,130 @@ def test_crash_after_submit_before_ack_never_duplicates_the_order():
     assert len(a2.executor.long.venue.fills) == 1 and len(a2.executor.short.venue.fills) == 1
 
 
-def test_recovery_with_an_unreadable_venue_requires_manual_intervention():
+def test_recovery_with_an_unreadable_venue_runs_the_trade_degraded_and_resumes_when_it_answers():
+    """Section 55: resume only if consistent. A venue that does not answer is not an inconsistency, so the trade must
+    not be parked in MANUAL_INTERVENTION_REQUIRED (never revisited, new trades blocked) for one dropped connection."""
     w = World(share_venues=True)
     enter_fully(w)
-    w.engine.active["arb0001"].executor.long.venue.connected = False
+    long_venue = w.engine.active["arb0001"].executor.long.venue
+    long_venue.connected = False
     engine2 = w.new_engine()
+    assert run(engine2.recover()) == []  # nobody needs to step in
+    assert w.state() is TradeState.DEGRADED and "arb0001" in engine2.active
+    assert not engine2.blocked() and not w.alerts("manual_intervention_required") and w.alerts("venue_disconnect")
+    orders = len(w.repo.orders_for("arb0001"))
+    run(engine2.run_once())  # still unreadable: no orders, still in the degraded/reconciling loop
+    assert w.state() in (TradeState.DEGRADED, TradeState.RECONCILING)
+    assert len(w.repo.orders_for("arb0001")) == orders
+    long_venue.connected = True
+    for _ in range(3):
+        w.clock.advance(seconds=10)
+        run(engine2.run_once())
+    assert w.state() is TradeState.HEDGED_OPEN and w.alerts("entry_resumed")
+
+
+class FlakyRebuild(VenueProvider):
+    """A provider whose rebuild raises for the first `failures` calls, like a venue that drops the connection."""
+
+    def __init__(self, inner, failures, error=None):
+        self.inner, self.failures, self.calls = inner, failures, 0
+        self.error = error or ExchangeRequestError("connection reset")
+
+    async def build(self, pair, trade_id, params):
+        return await self.inner.build(pair, trade_id, params)
+
+    async def rebuild(self, trade_row, params):
+        self.calls += 1
+        if self.failures > 0:
+            self.failures -= 1
+            raise self.error
+        return await self.inner.rebuild(trade_row, params)
+
+
+def _flaky_engine(w, failures, error=None):
+    provider = FlakyRebuild(w.provider, failures, error)  # w.provider hands back the same venues on rebuild
+    engine = TradeEngine(params=w.params, repo=w.repo, clock=w.clock, killswitch=w.kill, notifier=w.notifier,
+                         provider=provider, owner="worker-1")
+    return engine, provider
+
+
+def test_a_dropped_connection_while_rebuilding_a_trade_is_retried_at_once():
+    w = World(share_venues=True)
+    enter_fully(w)
+    engine2, provider = _flaky_engine(w, failures=2)  # fails twice, the third attempt works
+    assert run(engine2.recover()) == []
+    assert provider.calls == 3 and "arb0001" in engine2.active and not engine2.recovery_pending
+    assert w.state() is TradeState.HEDGED_OPEN and w.alerts("recovery") and not w.alerts("manual_intervention_required")
+
+
+def test_a_trade_that_cannot_be_rebuilt_yet_is_retried_every_30_seconds_and_never_sent_to_manual():
+    w = World(share_venues=True)
+    enter_fully(w)
+    engine2, provider = _flaky_engine(w, failures=4)  # 3 attempts at start-up fail, then 1 more retry fails
+    assert run(engine2.recover()) == []  # no human needed, and the database record is untouched
+    assert "arb0001" in engine2.recovery_pending and "arb0001" not in engine2.active
+    assert w.state() is TradeState.HEDGED_OPEN and not engine2.blocked()
+    assert len(w.alerts("venue_disconnect")) == 1
+    run(engine2.run_once())  # the first cycle tries again: fails again, stays quiet
+    assert provider.calls == 4 and "arb0001" in engine2.recovery_pending and len(w.alerts("venue_disconnect")) == 1
+    run(engine2.run_once())  # not yet 30 s later: no new attempt
+    assert provider.calls == 4
+    w.clock.advance(seconds=31)
+    run(engine2.run_once())
+    assert provider.calls == 5 and not engine2.recovery_pending and "arb0001" in engine2.active
+    assert w.alerts("recovery") and w.state() is TradeState.HEDGED_OPEN
+
+
+def test_the_engine_health_names_a_trade_that_is_not_rebuilt():
+    from app.workers.runner import Runner
+    w = World(share_venues=True)
+    enter_fully(w)
+    engine2, _ = _flaky_engine(w, failures=10)
+    run(engine2.recover())
+    from app.core.health import Health
+    health = Health(w.clock)
+    runner = Runner(settings=None, params=w.params, repo=w.repo, engine=engine2, scanner=None, notifier=w.notifier,
+                    health=health, clock=w.clock)
+    runner.mark_engine_health()
+    engine_health = health.snapshot()["engine"]
+    assert not engine_health["ok"] and "arb0001 not rebuilt after the restart" in engine_health["detail"]
+
+
+def test_a_missing_adapter_or_credential_at_restart_still_needs_a_human():
+    w = World(share_venues=True)
+    enter_fully(w)
+    engine2, provider = _flaky_engine(w, failures=10, error=UnsupportedVenue("no credentials to manage the trade"))
     assert run(engine2.recover()) == ["arb0001"]
+    assert provider.calls == 1  # waiting cannot fix it: no retries
     assert w.state() is TradeState.MANUAL_INTERVENTION_REQUIRED
     assert engine2.blocked() and w.alerts("manual_intervention_required")
+
+
+def test_a_live_trade_is_never_rebuilt_with_simulated_legs_when_the_bot_runs_in_paper_mode():
+    """Otherwise the trade is rebuilt on paper accounts, finds nothing to close and ends at $0 while its real positions
+    stay open on the exchanges."""
+    w = World()
+    w.repo.create_trade(id="arb0009", asset="BTC", run_mode="live", long_venue="L", short_venue="S",
+                        long_symbol="BTCUSDT", short_symbol="BTCUSDT", state="HEDGED_OPEN", opened_at=T0,
+                        target_notional_per_leg=D(500), leverage=D(2))
+    assert run(w.engine.recover()) == ["arb0009"]  # a human is told
+    assert "arb0009" not in w.engine.active and w.state("arb0009") is TradeState.HEDGED_OPEN  # untouched
+    alert = w.alerts("manual_intervention_required")[0]
+    assert alert.severity == "critical" and "REAL" in alert.message and "live" in alert.message
+    assert not w.engine.blocked()  # simulated trials are not held up by it
+
+
+def test_a_paper_trial_is_left_alone_when_the_bot_goes_live_and_resumes_in_paper_mode():
+    """Live go-live used to rebuild the open paper trials as live legs, fail, and block every new trade."""
+    w = World(share_venues=True)
+    enter_fully(w)
+    live_engine = w.new_engine()
+    live_engine.params = w.params.model_copy(update={"run_mode": "live"})
+    assert run(live_engine.recover()) == []
+    assert live_engine.active == {} and w.state() is TradeState.HEDGED_OPEN and not live_engine.blocked()
+    assert w.alerts("recovery") and not w.alerts("manual_intervention_required")
+    paper_engine = w.new_engine()  # back in paper mode: it resumes
+    assert run(paper_engine.recover()) == [] and "arb0001" in paper_engine.active
 
 
 def test_recovery_rejects_records_that_never_reached_a_venue():
@@ -626,3 +743,39 @@ def test_an_entry_that_never_filled_is_closed_at_its_time_limit():
     w.advance_and_step(1, hours=w.params.max_entry_hours)
     assert w.state() is TradeState.CLOSED and w.repo.get_trade("arb0001").exit_reason == "no_fills"
     assert w.repo.orders_for("arb0001") == []
+
+
+def test_paper_observation_uses_one_book_per_leg_and_values_equity_at_that_price():
+    w = World()
+    enter_fully(w)
+    active = w.engine.active["arb0001"]
+    calls = {"L": 0, "S": 0}
+    for name, source in w.src.items():
+        original = source.get_order_book
+        async def counted(symbol, depth=50, *, name=name, original=original):
+            calls[name] += 1
+            return await original(symbol, depth)
+        source.get_order_book = counted
+        source.mid = D(110)
+    obs = run(w.engine.observe(active))
+    assert calls == {"L": 1, "S": 1} and obs.marks == {"long": D(110), "short": D(110)}
+    assert obs.long_equity == active.executor.long.venue.equity()
+    assert obs.short_equity == active.executor.short.venue.equity()
+    assert obs.long_equity + obs.short_equity - active.baseline_long - active.baseline_short == w.engine.live_pnl(active).total
+
+
+def test_venue_disconnect_alert_names_the_failed_endpoint_and_recovers():
+    w = World()
+    enter_fully(w)
+    source = w.src["S"]
+    original = source.get_funding_info
+    async def fail(*args):
+        raise ExchangeRequestError("S: request timed out (ReadTimeout) (GET /funding)")
+    source.get_funding_info = fail
+    w.step()
+    assert w.state() is TradeState.DEGRADED
+    assert "ReadTimeout" in w.alerts("venue_disconnect")[-1].message
+    assert "/funding" in w.alerts("venue_disconnect")[-1].message
+    source.get_funding_info = original
+    w.step()
+    assert w.state() is TradeState.HEDGED_OPEN

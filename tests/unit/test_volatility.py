@@ -51,14 +51,14 @@ def test_quiet_now_after_wild_history_scores_low():
     s = low_vol_score(c, c, rv_window=20, basis_window=20, min_observations=100)
     assert s.available
     assert s.underlying_rv_percentile < 45
-    assert entry_allowed(s, D(45))
+    assert entry_allowed(s, D(60))
 
 
 def test_wild_now_after_quiet_history_scores_high():
     c = candles(wavy(400, amp_early=0.01, amp_late=2.0, switch=380))
     s = low_vol_score(c, c, rv_window=10, basis_window=10, min_observations=100)
     assert s.available and s.underlying_rv_percentile > 90
-    assert not entry_allowed(s, D(45))
+    assert not entry_allowed(s, D(60))
 
 
 def test_basis_volatility_drives_the_score_when_underlying_is_calm():
@@ -72,17 +72,17 @@ def test_basis_volatility_drives_the_score_when_underlying_is_calm():
 def test_too_few_observations_waits():
     c = candles([100 + i * 0.01 for i in range(60)])
     s = low_vol_score(c, c, rv_window=20, basis_window=20, min_observations=500)
-    assert not s.available and not entry_allowed(s, D(45))
+    assert not s.available and not entry_allowed(s, D(60))
 
 
-@pytest.mark.parametrize("score,ok", [("20", True), ("40", True), ("45", True), ("45.0001", False), ("46", False)])
-def test_locked_45_boundary(score, ok):
+@pytest.mark.parametrize("score,ok", [("20", True), ("40", True), ("60", True), ("60.0001", False), ("61", False)])
+def test_locked_60_boundary(score, ok):
     s = VolScore(True, D(score), D(1), D(score), 1000, 1000)
-    assert entry_allowed(s, D(45)) is ok
+    assert entry_allowed(s, D(60)) is ok
 
 
 def test_unavailable_score_never_allows_entry():
-    assert not entry_allowed(VolScore(False, None, None, None, 0, 0, "x"), D(45))
+    assert not entry_allowed(VolScore(False, None, None, None, 0, 0, "x"), D(60))
 
 
 def test_unaligned_candles_are_matched_on_time_only():

@@ -1,20 +1,63 @@
-# Secrets
+# ==============================================================================
+# Environment & Secrets (NEVER COMMIT SENSITIVE VALUES)
+# ==============================================================================
 .env
 .env.*
 !.env.example
 
-# Reference/experimental capture folder: contains a hardcoded session cookie. Do not publish.
-Capture_zero_Delta/
+# ==============================================================================
+# Local Data & SQLite Storage
+# ==============================================================================
+data/*
+!data/.gitkeep
+*.db
+*.db-shm
+*.db-wal
+*.lock
 
-# Python
+# ==============================================================================
+# Application Runtime Logs
+# ==============================================================================
+logs/*
+!logs/.gitkeep
+*.log
+
+# ==============================================================================
+# Python & Virtual Environments
+# ==============================================================================
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .venv/
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+.eggs/
 
-# Generated research data
-data/
-
-# Tool caches and build output
+# ==============================================================================
+# Testing & Linting Caches
+# ==============================================================================
 .pytest_cache/
 .ruff_cache/
-*.egg-info/
+.coverage
+htmlcov/
+
+# ==============================================================================
+# Editor, IDE & AI Agent Working Directories
+# ==============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+.agents/
+skills-lock.json
+
+# ==============================================================================
+# OS Generated Files
+# ==============================================================================
+.DS_Store
+Thumbs.db
+ehthumbs.db

@@ -4,15 +4,15 @@
     python -m app.main                                     (same, via uvicorn)
 
 Starting refuses with a clear message if the configuration is not allowed (for example live mode).
+Logs go to logs/bot.log and logs/http.log; the console shows only warnings and milestones (app/core/logging_setup.py).
 """
 
-import logging
 import os
 
 from app.api.app import create_app
+from app.core.logging_setup import configure_logging
 
-logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
-                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+configure_logging()
 
 app = create_app()
 

@@ -15,6 +15,7 @@ from app.core.config import ZeroDeltaSettings
 from app.core.health import Health
 from app.core.trading_config import LiveGateError, ResolvedParams, TradingSettings, check_live_gate
 from app.exchanges.base import ExchangeAdapter
+from app.exchanges.registry import excluded_venues
 from app.execution.engine import TradeEngine
 from app.execution.venue_provider import LiveVenueProvider, PaperVenueProvider
 from app.notifications.notifier import Notifier
@@ -101,6 +102,23 @@ def build_runtime(
                                 f"long and a short venue); configured: {sorted(private_clients) or 'none'}")
         credential_secrets = credentials.secret_values()
     zd_settings = zd_settings or ZeroDeltaSettings()
+    if zd_settings.source == "postgres":
+        if zd_settings.database_url is not None:
+            from sqlalchemy.engine import make_url
+            from sqlalchemy.exc import ArgumentError
+            from app.providers.zerodelta.exceptions import ZeroDeltaConfigError
+            try:
+                local = make_url(settings.database_url)
+                upstream = make_url(zd_settings.database_url.get_secret_value())
+            except ArgumentError:
+                raise ZeroDeltaConfigError("Database connections must be valid URLs") from None
+            if local.drivername.startswith("postgres") and (local.host, local.port or 5432, local.database) == (
+                    upstream.host, upstream.port or 5432, upstream.database):
+                raise ZeroDeltaConfigError("DATABASE_URL must not point to the upstream Zero Delta database")
+        params = params.model_copy(update={"scan_interval_seconds": 3600,
+            "zero_delta_max_age_seconds": (60 + zd_settings.refresh_minute + zd_settings.refresh_grace_minutes) * 60,
+            "provenance": {**params.provenance, "scan_interval_seconds": "provider_default",
+                           "zero_delta_max_age_seconds": "provider_default"}})
     clock = clock or Clock()
     repo = Repository(settings.database_url, clock)
     health = Health(clock)
@@ -116,7 +134,7 @@ def build_runtime(
         kill.pause_new_entries = bool(saved.get("pause_new_entries"))
         kill.emergency_flatten = bool(saved.get("emergency_flatten"))
 
-    secrets = [v.get_secret_value() for v in (zd_settings.session_cookie,) if v is not None]
+    secrets = [v.get_secret_value() for v in (zd_settings.session_cookie, zd_settings.database_url) if v is not None]
     if settings.admin_api_token:
         secrets.append(settings.admin_api_token)
     secrets.extend(credential_secrets)  # API keys never appear in an alert
@@ -137,14 +155,17 @@ def build_runtime(
     engine = TradeEngine(params=params, repo=repo, clock=clock, killswitch=kill, notifier=notifier, provider=provider,
                          earnings=earnings)
 
-    if zd is None and zd_settings.enabled and zd_settings.session_cookie is not None and zd_settings.user_id is not None:
-        zd = ZeroDeltaProvider(zd_settings)
+    configured = (zd_settings.database_url is not None if zd_settings.source == "postgres" else
+                  zd_settings.session_cookie is not None and zd_settings.user_id is not None)
+    if zd is None and zd_settings.enabled and configured:
+        zd = ZeroDeltaProvider(zd_settings, now=clock.now)
     elif zd is None:
         log.warning("Zero Delta is not configured: the bot will manage existing trades but find no new ones")
 
     scanner = Scanner(params=params, zd_settings=zd_settings, zd=zd, source_for_venue=lookup, repo=repo,
                       engine=engine, notifier=notifier, clock=clock, health=health,
-                      earnings=earnings, execution_venue=execution_venue)
+                      earnings=earnings, execution_venue=execution_venue,
+                      excluded_venues=excluded_venues(settings.exclude_venues))
     runner = Runner(settings=settings, params=params, repo=repo, engine=engine, scanner=scanner, notifier=notifier,
                     health=health, clock=clock)
     return Runtime(settings, params, repo, clock, kill, notifier, health, engine, scanner, runner, zd, adapters,

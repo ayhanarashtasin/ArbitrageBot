@@ -64,17 +64,19 @@ def test_entry_spread_signs():
     assert spread == D("-0.2") / ref and cost == -spread
 
 
-@pytest.mark.parametrize("cost,ok", [("0.0001", True), ("0.0002", True), ("0.00020001", False)])
-def test_two_hour_rule_boundaries(cost, ok):
-    # net funding per hour = 0.0001 - 0.0, so two hours = 0.0002
-    passes, expected = spread_rule(D(cost), D("0.0001"), D(0), D(2))
-    assert expected == D("0.0002") and passes is ok
+@pytest.mark.parametrize("cost,ok", [("0.0004", True), ("0.0008", True), ("0.00080001", False)])
+def test_eight_hour_rule_uses_median_funding_boundaries(cost, ok):
+    # Current edge is positive but small; the 7-day median (0.0001/h) allows 0.0008 over eight hours.
+    passes, expected = spread_rule(D(cost), D("0.00001"), D("0.0001"), D(8))
+    assert expected == D("0.0008") and passes is ok
 
 
-@pytest.mark.parametrize("short,long", [("0.0001", "0.0001"), ("0.0001", "0.0002"), ("-0.0001", "0")])
-def test_non_positive_expected_funding_rejects(short, long):
-    passes, expected = spread_rule(D(0), D(short), D(long), D(2))
-    assert expected <= 0 and passes is False
+@pytest.mark.parametrize("current,median", [("0", "0.0001"), ("-0.0001", "0.0001"),
+                                             ("0.0001", "0"), ("0.0001", None)])
+def test_non_positive_or_missing_funding_rejects(current, median):
+    passes, expected = spread_rule(D(0), D(current), None if median is None else D(median), D(8))
+    assert passes is False
+    assert expected == (D(0) if median is None else D(median) * 8)
 
 
 def test_net_edge_arithmetic():

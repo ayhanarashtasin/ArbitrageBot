@@ -50,16 +50,21 @@ class Runner:
         self._stop = asyncio.Event()
         self._last_error_alert = 0.0
         self._readiness_at = 0.0
+        self.loop_metrics: dict[str, dict] = {}
 
     def stop(self) -> None:
         self._stop.set()
+        if self.scanner is not None:
+            self.scanner.stopping = True  # a sweep in progress ends early instead of holding up the shutdown
 
     async def startup(self) -> list[str]:
         """Recover unfinished trades before anything else. Returns trades that need a human."""
         provenance = {k: v for k, v in self.params.provenance.items() if v == "paper_default"}
+        live = self.params.run_mode == "live"
         await self.notifier.alert(
-            "startup", f"mode={self.params.run_mode}, live disabled, assets={self.settings.scan_assets}, "
-                       f"{len(provenance)} parameters use paper defaults")
+            "startup", f"mode={self.params.run_mode}, {'LIVE TRADING ENABLED: real orders' if live else 'live disabled'}, "
+                       f"assets={self.settings.scan_assets}, {len(provenance)} parameters use paper defaults",
+            severity="warning" if live else "info")
         if self._live:
             await self.check_live_venues()  # first: it also measures each venue's clock for the signed requests
         manual = await self.engine.recover()
@@ -107,6 +112,7 @@ class Runner:
 
     async def _guard(self, name: str, coro) -> bool:
         """Run one iteration. True when it completed; False (health red, alert rate limited) when it raised."""
+        started = time.monotonic()
         try:
             await coro
             return True
@@ -119,6 +125,12 @@ class Runner:
                 self._last_error_alert = time.monotonic()
                 await self.notifier.alert("critical_error", f"{name} failed: {_brief(exc)}", severity="critical")
             return False
+        finally:
+            ms = (time.monotonic() - started) * 1000
+            previous = self.loop_metrics.get(name, {})
+            self.loop_metrics[name] = {"iterations": previous.get("iterations", 0) + 1,
+                                      "last_duration_ms": round(ms, 1),
+                                      "max_duration_ms": round(max(ms, previous.get("max_duration_ms", 0)), 1)}
 
     def mark_engine_health(self) -> None:
         """Green only when the loop completed AND every active trade is in a normal state.
@@ -129,6 +141,7 @@ class Runner:
         active = self.engine.active.values()
         troubled = [f"{t.id} {self.engine.state_of(t).value}" for t in active
                     if self.engine.state_of(t) in UNHEALTHY_TRADE_STATES]
+        troubled += [f"{trade_id} not rebuilt after the restart" for trade_id in self.engine.recovery_pending]
         detail = f"{len(self.engine.active)} active trades"
         if troubled:
             self.health.mark("engine", False, detail + "; not healthy: " + ", ".join(troubled),
@@ -160,16 +173,26 @@ class Runner:
             await self._sleep(self.engine.recommended_delay())
 
     async def scan_loop(self) -> None:
+        database_retries = 0
         while not self._stop.is_set():
             if self._live and time.monotonic() - self._readiness_at > LIVE_READINESS_EVERY_SECONDS:
                 await self._guard("live readiness", self.check_live_venues())
-            if self.engine.kill.entries_allowed and not self.engine.blocked():
+            if self.scanner.database_source or (self.engine.kill.entries_allowed and not self.engine.blocked()):
                 assets = await self.scanner.resolve_assets(self.settings.scan_assets, self.settings.exclude_assets)
                 await self._guard("scanner", self.scanner.scan_all(assets))
             else:  # paused on purpose: say so, rather than let the last sweep's report go stale and red
                 self.health.mark("scanner", True, "not scanning: new entries are paused or blocked",
                                  stale_after=scan_stale_seconds(self.params))
-            await self._sleep(self.params.scan_interval_seconds)
+            if self.scanner.database_source:
+                from app.providers.zerodelta.postgres import next_refresh
+                delay = (next_refresh(self.clock.now(), self.scanner.zd_settings.refresh_minute)
+                         - self.clock.now()).total_seconds()
+                database_retries = database_retries + 1 if (self.scanner._zd_alerted or self.scanner.sweep.get("partial")) else 0
+                if 0 < database_retries <= self.scanner.zd_settings.max_retries:
+                    delay = min(delay, 60)
+                await self._sleep(delay)
+            else:
+                await self._sleep(self.params.scan_interval_seconds)
 
     async def watch_loop(self) -> None:
         while not self._stop.is_set():

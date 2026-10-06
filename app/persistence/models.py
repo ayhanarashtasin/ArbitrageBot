@@ -56,6 +56,16 @@ class Instrument(Base):
     __table_args__ = (UniqueConstraint("venue", "symbol", "fetched_at"),)
 
 
+class ZeroDeltaSummaryBatch(Base):
+    """Immutable hourly screening universe; independent of entered-trade audit observations."""
+
+    __tablename__ = "zerodelta_summary_batches"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    as_of: Mapped[datetime] = _ts(index=True)
+    fetched_at: Mapped[datetime] = _ts()
+    detail: Mapped[dict] = mapped_column(JSON)
+
+
 class ZeroDeltaMarket(Base):
     __tablename__ = "zerodelta_markets"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -272,7 +282,7 @@ class EquitySnapshot(Base):
     long_ratio: Mapped[Decimal | None] = mapped_column(DecimalString, nullable=True)
     short_ratio: Mapped[Decimal | None] = mapped_column(DecimalString, nullable=True)
     net_delta_usd: Mapped[Decimal | None] = mapped_column(DecimalString, nullable=True)
-    recorded_at: Mapped[datetime] = _ts()
+    recorded_at: Mapped[datetime] = _ts(index=True)  # indexed: old snapshots are pruned by time after every sweep
 
 
 class RiskEvent(Base):

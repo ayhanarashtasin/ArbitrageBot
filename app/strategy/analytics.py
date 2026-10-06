@@ -25,6 +25,9 @@ class EdgeStats(BaseModel):
     sign_flip_count: int
     longest_positive_edge_streak: int  # consecutive hourly observations with edge > 0
     latest: Decimal  # last observation in the window
+    largest_positive_contribution: Decimal | None = None
+    top_three_positive_contribution: Decimal | None = None
+    mean_without_largest: Decimal | None = None
 
 
 def _sign(x: Decimal) -> int:
@@ -36,6 +39,9 @@ def compute_edge_stats(edges: list[Decimal]) -> EdgeStats:
     if not edges:
         raise ValueError("no edge values")
     n = len(edges)
+    total = sum(edges, Decimal(0))
+    positives = sorted((e for e in edges if e > 0), reverse=True)
+    positive_total = sum(positives, Decimal(0))
     positive = sum(1 for e in edges if e > 0)
     negative = sum(1 for e in edges if e < 0)
     signs = [_sign(e) for e in edges if e != 0]
@@ -55,4 +61,7 @@ def compute_edge_stats(edges: list[Decimal]) -> EdgeStats:
         sign_flip_count=flips,
         longest_positive_edge_streak=best,
         latest=edges[-1],
+        largest_positive_contribution=positives[0] / positive_total if positive_total else None,
+        top_three_positive_contribution=sum(positives[:3], Decimal(0)) / positive_total if positive_total else None,
+        mean_without_largest=(total - max(edges)) / (n - 1) if n > 1 else None,
     )

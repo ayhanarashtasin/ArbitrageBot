@@ -24,8 +24,8 @@ D = Decimal
 LOCKED_MAX_LEVERAGE = D(4)
 LOCKED_TWAP_ENTRY_MINUTES = 360
 LOCKED_TWAP_MAX_CHILD_USD = D(100)
-LOCKED_LOW_VOL_MAX_PERCENTILE = D(45)
-LOCKED_SPREAD_HORIZON_MINUTES = 120
+LOCKED_LOW_VOL_MAX_PERCENTILE = D(60)
+LOCKED_SPREAD_HORIZON_MINUTES = 480
 LOCKED_CONTROLLED_EXIT_RATIO = D("0.30")
 LOCKED_CONTROLLED_EXIT_MINUTES = 180
 LOCKED_EMERGENCY_EXIT_RATIO = D("0.10")
@@ -100,7 +100,7 @@ DESIGN_DEFAULTS: dict[str, tuple[object, str]] = {
     "selection_one_per_asset": (True, "each selected pair is a different coin, so three picks are three opportunities"),
     "selection_require_live_edge": (True, "a pick's current funding edge must still be positive, not only its 7-day average"),
     "earnings_blackout_days": (3, "the task spec: no stock trade within 2-3 days of earnings; 3 is the cautious end"),
-    "entry_slice_gates": (True, "the 2 h spread rule and the low-vol score are re-checked before EVERY TWAP slice"),
+    "entry_slice_gates": (True, "the 8 h median-funding spread rule and low-vol score are re-checked before EVERY TWAP slice"),
     "watch_interval_seconds": (60, "selected pairs that are waiting for low volatility are re-checked every minute"),
     "shadow_paper_enabled": (True, "selected pairs also get rule-only forward paper trials when the net-edge or portfolio gate blocks"),
     "zero_delta_mismatch_tolerance_per_hour": (D("0.00002"), "fraction/h (0.002 %/h, about 17 % APR) before ZERO_DELTA_EXCHANGE_MISMATCH"),
@@ -184,7 +184,7 @@ class ResolvedParams(BaseModel):
     entry_slice_gates: bool
     watch_interval_seconds: int
     shadow_paper_enabled: bool
-    # provenance: field name -> "explicit" | "paper_default" | "locked"
+    # provenance: field name -> "explicit" | "paper_default" | "provider_default" | "locked"
     provenance: dict[str, str] = Field(default_factory=dict)
 
 
@@ -198,6 +198,9 @@ class TradingSettings(BaseSettings):
     scan_assets: Annotated[list[str], NoDecode] = ["ALL"]
     # coins never scanned, e.g. equity or commodity tickers that project.md section 2 puts out of scope
     exclude_assets: Annotated[list[str], NoDecode] = []
+    # exchanges never used for a new trade (selection, verification, price lookups), e.g. one that refuses this
+    # machine's region: a Zero Delta venue name ("BloFin USDT") or a whole exchange ("BloFin" = USDT and USDC)
+    exclude_venues: Annotated[list[str], NoDecode] = []
     database_url: str = "sqlite:///data/arbitrage.db"
     admin_api_token: str | None = None
     telegram_enabled: bool = False
@@ -286,7 +289,7 @@ class TradingSettings(BaseSettings):
     @classmethod
     def _vol(cls, v: Decimal) -> Decimal:
         if v > LOCKED_LOW_VOL_MAX_PERCENTILE:
-            raise ValueError("LOW_VOL_MAX_PERCENTILE is locked at 45 (it may only be lowered)")
+            raise ValueError("LOW_VOL_MAX_PERCENTILE is locked at 60 (it may only be lowered)")
         return v
 
     @field_validator("scan_assets", "exclude_assets", mode="before")
@@ -295,6 +298,16 @@ class TradingSettings(BaseSettings):
         if isinstance(v, str):
             v = v.split(",")
         return [a.strip().upper() for a in v if a.strip()]
+
+    @field_validator("exclude_venues", mode="before")
+    @classmethod
+    def _venues(cls, v):
+        from app.exchanges.registry import excluded_venues  # lazy: the adapters are not needed to read settings
+        if isinstance(v, str):
+            v = v.split(",")
+        names = [a.strip() for a in v if a.strip()]
+        excluded_venues(names)  # an unknown name is refused here, at start-up
+        return names
 
     @field_validator("selection_metric")
     @classmethod

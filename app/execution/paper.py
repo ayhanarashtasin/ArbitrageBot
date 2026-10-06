@@ -136,6 +136,10 @@ class PaperVenue(ExchangeAdapter):
         self._need_connection()
         return await self._src.get_candles(symbol, timeframe, limit)
 
+    async def get_closed_candles(self, symbol: str, timeframe: str = "1m", limit: int = 200) -> list[Candle]:
+        self._need_connection()
+        return await self._src.get_closed_candles(symbol, timeframe, limit)
+
     async def get_fee_schedule(self, symbol: str) -> FeeSchedule:
         return FeeSchedule(venue=self.name, taker_fraction=self._taker, maker_fraction=self._maker,
                            verified=self._fee_verified)
@@ -173,15 +177,18 @@ class PaperVenue(ExchangeAdapter):
     def equity(self) -> Decimal:
         return self._balance + self._unrealized()
 
-    async def _refresh_marks(self) -> None:
+    async def _refresh_marks(self, exclude_symbol: str | None = None) -> None:
         """Mark open positions to the current market so equity is never one cycle stale."""
         for symbol, pos in self._positions.items():
-            if pos.quantity != 0:
+            if pos.quantity != 0 and symbol != exclude_symbol:
                 await self.get_order_book(symbol)
 
     async def get_account_equity(self) -> AccountState:
         self._need_connection()
         await self._refresh_marks()
+        return self._account_state()
+
+    def _account_state(self) -> AccountState:
         eq = self.equity()
         used = self._used_margin()
         # margin_utilization is the venues' MARGIN RATIO: maintenance margin / equity, liquidation at 1 (100 %).
@@ -190,6 +197,16 @@ class PaperVenue(ExchangeAdapter):
         ratio = (mm / eq) if eq > 0 else (D(1) if mm > 0 else None)
         return AccountState(venue=self.name, equity_usd=eq, available_margin_usd=eq - used,
                             margin_utilization=ratio, received_at=self._clock.now())
+
+    async def get_account_snapshot(self, symbol: str, book: OrderBook) -> tuple[AccountState, PositionState | None]:
+        """Account and position valued with the engine's same fresh book, including any other held symbols."""
+        self._need_connection()
+        if book.venue != self.name or book.symbol != symbol or book.best_bid is None or book.best_ask is None:
+            raise ExchangeRequestError(f"{self.name}: invalid book for paper account snapshot")
+        self.set_mark(symbol, (book.best_bid + book.best_ask) / 2)
+        await self._refresh_marks(exclude_symbol=symbol)
+        pos = self._positions.get(symbol)
+        return self._account_state(), self._position_state(symbol, pos) if pos and pos.quantity != 0 else None
 
     async def get_available_balance(self) -> Decimal:
         return (await self.get_account_equity()).available_margin_usd

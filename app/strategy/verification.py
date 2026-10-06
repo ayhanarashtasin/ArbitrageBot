@@ -7,7 +7,7 @@ data, and a disagreement with Zero Delta blocks the trade (ZERO_DELTA_EXCHANGE_M
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 
@@ -68,6 +68,8 @@ class LegData:
     taker_fee: Decimal  # fraction
     fee_verified: bool
     settled_rate_per_hour: Decimal | None = None  # the venue's LAST SETTLED rate (fraction / h); None = not read
+    settled_history: tuple[tuple[datetime, Decimal], ...] = ()  # fractions per settlement, with actual times
+    predicted_history: tuple[FundingInfo, ...] = ()  # previously observed direct estimates, never settlements
 
 
 def _fmt(x: Decimal | None, places: int = 8) -> str:
@@ -77,23 +79,68 @@ def _fmt(x: Decimal | None, places: int = 8) -> str:
 def zero_delta_mismatch(
     pair: PairAnalytics, long_funding: FundingInfo, short_funding: FundingInfo, tolerance_per_hour: Decimal,
     settled: tuple[Decimal | None, Decimal | None] = (None, None),
+    histories: tuple[tuple, tuple] = ((), ()),
+    predictions: tuple[tuple[FundingInfo, ...], tuple[FundingInfo, ...]] = ((), ()),
 ) -> list[Check]:
     """Compare Zero Delta's current funding (percent per interval) with the venue's own (fraction).
 
-    Zero Delta shows the LAST SETTLED rate (live 2026-09-30: Binance ONEUSDT, Zero Delta -0.034797 %/h against the
+    The Dash source shows the LAST SETTLED rate (live 2026-09-30: Binance ONEUSDT, Zero Delta -0.034797 %/h against the
     10:00 settlement -0.034536 %/h), while the venues' current rate is the running estimate for the NEXT settlement
     (-0.023171 %/h at the same moment). Comparing only with the estimate flagged every coin with fast-moving funding,
     i.e. the best opportunities, as a mismatch. The rate therefore agrees when it matches EITHER the venue's estimate
-    OR its last settled rate. A wrong symbol, interval or sign still matches neither.
+    OR its last settled rate. PostgreSQL retains its explicit funding kind and source timestamp: a changed later
+    estimate waits for comparable evidence, and a final settlement never stands in for a historical prediction.
     """
     checks: list[Check] = []
-    for label, leg, direct, last in (("long", pair.long_leg, long_funding, settled[0]),
-                                     ("short", pair.short_leg, short_funding, settled[1])):
+    for label, leg, direct, last, history, estimates in (
+        ("long", pair.long_leg, long_funding, settled[0], histories[0], predictions[0]),
+        ("short", pair.short_leg, short_funding, settled[1], histories[1], predictions[1])):
         interval_ok = leg.funding_interval_hours == direct.interval_hours
         checks.append(Check(
             f"{label}_funding_interval_matches", interval_ok,
             f"zerodelta={leg.funding_interval_hours}h direct={direct.interval_hours}h", "equal", "mismatch"))
         zd_per_hour = leg.current_funding_per_hour / 100  # percent -> fraction
+        if leg.source == "postgres":
+            reference = None
+            reference_at = None
+            reference_kind = "unavailable"
+            comparable = True
+            if leg.funding_kind == "settled" and leg.funding_as_of:
+                matching = [(t, r) for t, r in history if t <= leg.funding_as_of
+                            and leg.funding_as_of - t < timedelta(hours=float(leg.funding_interval_hours))]
+                if matching:
+                    reference_at, rate = max(matching, key=lambda p: p[0])
+                    reference = rate / leg.funding_interval_hours
+                    reference_kind = "settled"
+            elif leg.funding_kind == "predicted" and leg.funding_as_of:
+                def same_period(info):
+                    end = info.next_funding_time
+                    if end is None or info.interval_hours != leg.funding_interval_hours:
+                        return False
+                    return (leg.next_funding_time is None or end == leg.next_funding_time) and (
+                        end - timedelta(hours=float(info.interval_hours)) <= leg.funding_as_of < end)
+
+                matching = [info for info in estimates if info.is_predicted and same_period(info)
+                    and abs(((info.source_time or info.received_at) - leg.funding_as_of).total_seconds()) <= 60]
+                if matching:
+                    info = min(matching, key=lambda i: abs(((i.source_time or i.received_at) - leg.funding_as_of).total_seconds()))
+                    reference, reference_at = info.rate_per_hour, info.source_time or info.received_at
+                    reference_kind = "recorded_estimate"
+                elif same_period(direct):
+                    reference, reference_at = direct.rate_per_hour, direct.source_time or direct.received_at
+                    comparable = abs((reference_at - leg.funding_as_of).total_seconds()) <= 60
+                    reference_kind = "current_estimate" if comparable else "later_estimate"
+                # A final settled payment is not the historical running estimate. Missing comparable evidence waits.
+            checks.append(Check(f"{label}_funding_reference_available", reference is not None,
+                f"kind={leg.funding_kind} as_of={leg.funding_as_of} next={leg.next_funding_time}",
+                "same settlement/estimate period", "wait"))
+            diff = None if reference is None else abs(zd_per_hour - reference)
+            checks.append(Check(f"{label}_funding_rate_matches", diff is not None and diff <= tolerance_per_hour,
+                f"zd={_fmt(zd_per_hour)} direct={_fmt(reference)} difference={_fmt(diff)} per hour; "
+                f"reference={reference_kind} at={reference_at}; source={leg.funding_as_of}; "
+                f"next={leg.next_funding_time or direct.next_funding_time}", f"<= {tolerance_per_hour}",
+                "wait" if reference is None or not comparable else "mismatch"))
+            continue
         diff = abs(zd_per_hour - direct.rate_per_hour)
         diff_settled = None if last is None else abs(zd_per_hour - last)
         best = diff if diff_settled is None else min(diff, diff_settled)
@@ -133,7 +180,9 @@ def evaluate_entry(
         add("zero_delta_data_fresh", zero_delta_age_seconds <= params.zero_delta_max_age_seconds,
             f"{zero_delta_age_seconds:.0f}s", f"<= {params.zero_delta_max_age_seconds}s", "wait")
     checks += zero_delta_mismatch(pair, long.funding, short.funding, params.zero_delta_mismatch_tolerance_per_hour,
-                                  (long.settled_rate_per_hour, short.settled_rate_per_hour))
+                                    (long.settled_rate_per_hour, short.settled_rate_per_hour),
+                                    (long.settled_history, short.settled_history),
+                                    (long.predicted_history, short.predicted_history))
 
     # 1. Tradability and metadata
     for label, leg in (("long", long), ("short", short)):
@@ -180,13 +229,18 @@ def evaluate_entry(
     add("legs_can_be_sized_equally", fits, f"{q} per slice (lot {lot})",
         f"> 0, >= both venues' minimums, <= ${child} on each leg")
 
-    # 4. Spread rule (LOCKED) on real executable prices
+    # 4. Spread rule (LOCKED): positive current edge, with up to 8 h of the 7-day median covering the spread
     spread, neg_cost = entry_spread(lv.vwap, sv.vwap)
     horizon_h = D(params.funding_screening_horizon_minutes) / 60
     long_h, short_h = long.funding.rate_per_hour, short.funding.rate_per_hour
-    passes, expected_2h = spread_rule(neg_cost, short_h, long_h, horizon_h)
-    add("net_funding_positive_over_2h", expected_2h > 0, _fmt(expected_2h), "> 0")
-    add("negative_spread_within_2h_funding", passes, f"cost={_fmt(neg_cost)}", f"<= {_fmt(expected_2h)}")
+    net_h = short_h - long_h
+    median_net_h = pair.stats.median / 100 if pair.stats else None  # Zero Delta statistics are percent per hour
+    passes, expected_median_funding = spread_rule(neg_cost, net_h, median_net_h, horizon_h)
+    add("net_funding_positive_now", net_h > 0, _fmt(net_h), "> 0")
+    add("median_funding_positive", median_net_h is not None and median_net_h > 0,
+        _fmt(median_net_h), "> 0 (7-day median)")
+    add("negative_spread_within_8h_median_funding", passes, f"cost={_fmt(neg_cost)}",
+        f"<= {_fmt(expected_median_funding)} (8 h of 7-day median)")
 
     # Live orders may only be sized on fees read from the venue's account API (section 20). Paper may assume.
     if params.run_mode == "live":
@@ -194,7 +248,6 @@ def evaluate_entry(
             f"long={long.fee_verified} short={short.fee_verified}", "both True")
 
     # 5. Net edge after fees and slippage (fees are configured assumptions until verified: Phase 8)
-    net_h = short_h - long_h
     conservative_h = min(net_h, pair.stats.mean / 100) if pair.stats else net_h  # ZD stats are percent per hour
     net_edge = expected_net_edge_bps(
         net_funding_per_hour=conservative_h,
@@ -206,9 +259,11 @@ def evaluate_entry(
         slippage_bps_exit_estimate=(lv.slippage_bps or D(0), sv.slippage_bps or D(0)),
     )
     add("expected_net_edge", net_edge >= params.min_expected_net_edge_bps,
-        f"{net_edge:.2f}bps", f">= {params.min_expected_net_edge_bps}bps")
+         f"{net_edge:.2f}bps", f">= {params.min_expected_net_edge_bps}bps")
+    income_bps = conservative_h * params.expected_hold_hours * D(10_000)
+    cost_bps = income_bps - net_edge
 
-    # 6. Volatility filter (LOCKED, 45): a failure means WAIT, not reject
+    # 6. Volatility filter (LOCKED, 60): a failure means WAIT, not reject
     if vol is None or not vol.available:
         add("volatility_score_available", False, vol.reason if vol else "not computed", "available", "wait")
     else:
@@ -219,8 +274,19 @@ def evaluate_entry(
     metrics.update({
         "p_long_buy": str(lv.vwap), "p_short_sell": str(sv.vwap),
         "entry_spread_pct": _fmt(spread * 100), "negative_spread_cost_pct": _fmt(neg_cost * 100),
-        "expected_net_funding_2h": _fmt(expected_2h), "net_funding_per_hour": _fmt(net_h),
+        "expected_net_funding_8h_median": _fmt(expected_median_funding),
+        "median_net_funding_per_hour_7d": _fmt(median_net_h), "net_funding_per_hour": _fmt(net_h),
         "expected_net_edge_bps": f"{net_edge:.4f}",
+        "conservative_net_funding_per_hour": str(conservative_h),
+        "expected_hold_hours": str(params.expected_hold_hours),
+        "expected_funding_income_bps": str(income_bps), "round_trip_cost_bps": str(cost_bps),
+        "breakeven_hours": str(cost_bps / (conservative_h * D(10_000))) if conservative_h > 0 else "unreachable",
+        "entry_fees_bps": str((long.taker_fee + short.taker_fee) * D(10_000)),
+        "exit_fees_bps": str((long.taker_fee + short.taker_fee) * D(10_000)),
+        "adverse_spread_bps": str(neg_cost * D(10_000)),
+        "entry_slippage_bps": str((lv.slippage_bps or D(0)) + (sv.slippage_bps or D(0))),
+        "exit_slippage_estimate_bps": str((lv.slippage_bps or D(0)) + (sv.slippage_bps or D(0))),
+        "income_assumption": "constant conservative hourly edge at full target size; entry waits and early exits reduce earnings",
         "long_taker_fee": str(long.taker_fee), "short_taker_fee": str(short.taker_fee),
         "fees_verified": str(long.fee_verified and short.fee_verified),
         "long_slippage_bps": _fmt(lv.slippage_bps, 4), "short_slippage_bps": _fmt(sv.slippage_bps, 4),

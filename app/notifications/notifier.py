@@ -50,7 +50,7 @@ class Notifier:
         text = self.scrub(message)
         alert_id = self._repo.add_alert(kind, severity, text, trade_id)
         log.log({"info": logging.INFO, "warning": logging.WARNING, "critical": logging.ERROR}[severity],
-                "[%s] %s", kind, text)
+                "[%s] %s", kind, text, extra={"alert_kind": kind})  # the console shows milestone kinds only
         if not self._enabled:
             return
         prefix = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}[severity]

@@ -41,6 +41,11 @@ class PairLeg(BaseModel):
     avg_24h_volume_usd: Decimal
     funding_interval_hours: Decimal
     current_funding_per_hour: Decimal  # percent per hour, from the current venue table
+    source: str = "dash"
+    exchange_key: str | None = None
+    funding_kind: Literal["unknown", "settled", "predicted"] = "unknown"
+    funding_as_of: datetime | None = None
+    next_funding_time: datetime | None = None
 
 
 class PairAnalytics(BaseModel):
@@ -80,6 +85,8 @@ def _leg(m: MarketEligibility) -> PairLeg:
         avg_24h_volume_usd=s.avg_24h_volume_usd,
         funding_interval_hours=s.funding_interval_hours,
         current_funding_per_hour=s.normalized_funding_rate_per_hour,
+        source=s.source, exchange_key=s.exchange_key, funding_kind=s.funding_kind, funding_as_of=s.timestamp,
+        next_funding_time=s.next_funding_time,
     )
 
 
@@ -120,6 +127,7 @@ def generate_pairs(analysis: AssetAnalysis, settings: ZeroDeltaSettings, *,
             primary_days=settings.primary_lookback_days,
             min_days=settings.min_lookback_days,
             max_missing_intervals=settings.max_missing_intervals,
+            requested_end=as_of or analysis.analysis_end,
         )
 
         mean_ab = sum((v for _, v in window), Decimal(0)) / len(window) if window else Decimal(0)

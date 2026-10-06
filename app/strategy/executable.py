@@ -70,19 +70,17 @@ def entry_spread(p_long_buy: Decimal, p_short_sell: Decimal) -> tuple[Decimal, D
 
 def spread_rule(
     negative_spread_cost: Decimal,
-    short_funding_per_hour: Decimal,
-    long_funding_per_hour: Decimal,
-    horizon_hours: Decimal = D(2),
+    current_net_funding_per_hour: Decimal,
+    median_net_funding_per_hour: Decimal | None,
+    horizon_hours: Decimal,
 ) -> tuple[bool, Decimal]:
-    """LOCKED: the adverse entry spread may cost at most two hours of expected net funding.
+    """LOCKED: adverse spread must be covered by at most 8 h of 7-day median net funding.
 
-    Returns (passes, expected_net_funding_over_horizon). Rates are fractions per hour, positive
-    funding = long pays short, so a hedge earns short - long. If the expected income is not
-    positive the rule fails.
+    Funding rates are fractions per hour. Current funding must remain positive; the historical median
+    determines how much adverse spread is acceptable. Missing/non-positive median history fails closed.
     """
-    net_per_hour = short_funding_per_hour - long_funding_per_hour
-    expected = net_per_hour * horizon_hours
-    if expected <= 0:
+    expected = D(0) if median_net_funding_per_hour is None else median_net_funding_per_hour * horizon_hours
+    if current_net_funding_per_hour <= 0 or median_net_funding_per_hour is None or median_net_funding_per_hour <= 0:
         return False, expected
     return negative_spread_cost <= expected, expected
 

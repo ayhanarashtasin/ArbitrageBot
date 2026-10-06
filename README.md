@@ -3,13 +3,14 @@
 Delta-neutral, cross-venue perpetual-futures funding arbitrage. The bot holds a long on the venue where funding is
 cheap and a short on the venue where it is high, so price moves cancel and the funding difference is the profit.
 
-> **Status: paper trading only.** Live and testnet order placement is not implemented, and the bot refuses to
-> start in those modes. `project.md` is the authoritative specification; if this file and `project.md` disagree,
-> `project.md` wins.
+> **Status: paper trading by default; live trading is built but off.** Live order placement (Binance, Bybit, MEXC,
+> BloFin, Bitget) only starts behind the explicit gate in [Going live](#going-live) and has not yet been exercised with
+> real API keys. Testnet is not implemented, and the bot refuses to start in that mode. `project.md` is the
+> authoritative specification; if this file and `project.md` disagree, `project.md` wins.
 
 ## The plan the bot follows
 
-1. **Identify.** Sweep every coin Zero Delta lists (about 430, most liquid first, a couple at a time with a pause after each request) and read every possible pair with its last 7 days of funding. A sweep takes several minutes and repeats 15 minutes after the last one ends. `SCAN_ASSETS` limits it to chosen coins and `EXCLUDE_ASSETS` skips some.
+1. **Identify.** Sweep every coin Zero Delta lists (about 430, most liquid first, a couple at a time with a pause after each request) and read every possible pair with its last 7 days of funding. A sweep takes several minutes and repeats 15 minutes after the last one ends. `SCAN_ASSETS` limits it to chosen coins and `EXCLUDE_ASSETS` skips some. `EXCLUDE_VENUES` keeps whole exchanges out (for example `BloFin`, which refuses some regions).
 2. **Select.** Rank all pairs by their 7-day average funding edge and take the best `SELECTION_COUNT` (default 3), naming the
    exchange of each leg. Two lists are kept: the best pairs in the whole market (tradable or not, so it is always clear what
    the best opportunities are) and the best pairs the bot can actually trade (both venues have an adapter, different exchanges).
@@ -31,6 +32,62 @@ and venue universe; they do not reconstruct historical books, venue basis or the
 trials use actual current venue data and the same execution/risk engine as gated paper trades.
 
 ## What runs today
+
+### Database-first Zero Delta discovery
+
+`ZERO_DELTA_SOURCE=postgres` uses the owner-provided `marts.fct_coin_exchange_summary` and
+`public.perp_market_data`. The existing Dash source remains available with `ZERO_DELTA_SOURCE=dash`.
+
+- Summary rows are **per coin/venue**: screening ranks their **difference**, not the highest individual APR.
+- Discovery runs at **:05 UTC each hour** (configurable minute), with at most two bounded retry cycles for failures.
+  Waiting selections keep their one-minute watch; existing trades use the independent direct-venue engine.
+- The research ceiling defaults to 30 pairs, with capacity reserved for executable venues. Only their markets and
+  markets required by due frozen selections receive raw-history queries. Final rankings are labelled **best among
+  the validated shortlist**, not an exhaustive raw-history ranking of the market.
+- Every raw query includes the indexed base-coin expression, exact exchange/symbol and time bounds. The default
+  server statement budget is 12 s, below the owner's 15 s limit; truncated history is rejected. Cached data re-fetches
+  its last hour to incorporate corrections. Different raw symbols are never silently combined.
+- Hourly observations use the latest real snapshot in each UTC hour, retaining its original source time. Missing hours
+  and conflicting source timestamps remain invalid. Rates use each observation's own interval. Funding kind is retained:
+  a historical estimate is not represented as a settled payment, and replay cashflows remain approximations.
+- Picks show the largest-hour/top-three contribution to positive edge and the mean without the largest observation.
+  These are diagnostics, not a new weighted score or an automatic spike-rejection policy.
+- Summary batches and selected evidence are frozen in the **local** database. Today's shortlist is not retrospectively
+  used as last week's universe; frozen picks receive their original-direction week-later assessment, including coins
+  dropped from current summaries. Batch/pick audit history is retained; monitor local database storage growth.
+- The supplied schema has no refresh watermark. The console explicitly labels summary refresh as **unverified** and
+  validates the common cutoff of selected raw markets separately; it does not infer global refresh completion from one coin.
+
+**Setup:**
+
+```bash
+pip install -e ".[postgres,dev]"
+python -m app.tools.zerodelta_db_check --asset BTC --exchange binance_usdt --days 14
+python -m app.tools.migrate_zerodelta
+```
+
+The check uses `ZERO_DELTA_DATABASE_URL` from the environment; `--prompt-url` accepts it privately in an interactive
+terminal. It does not instantiate the trading runtime, write application tables, or access the website. It reports
+schema, indexes, bounded raw samples, missing semantics, and (when configured) normalized coverage, query latency and
+`EXPLAIN` output. Sampling alone does not establish units: confirm the database definitions with the owner.
+
+Set `ZERO_DELTA_DATABASE_URL` and the six `ZERO_DELTA_DB_*` contract fields listed in `.env.example`: volume unit,
+funding unit, interval unit, epoch unit, funding kind and UTC interpretation. Leave unknown facts unset: discovery reports
+the missing configuration and admits no new trades. Then set `ZERO_DELTA_SOURCE=postgres` and restart in paper mode.
+Browser cookie expiry has no bearing on PostgreSQL credentials or grants. Keep the bot's `DATABASE_URL` separate.
+
+Migration 001 adds only `zerodelta_summary_batches`, using the same SQLAlchemy metadata on SQLite and PostgreSQL;
+it is idempotent, and normal startup also creates the additive table. No upstream schema changes are made.
+
+**Live preflight, 2026-10-02:** the supplied access worked and returned 7,118 summary rows. Targeted BTC reads on
+Binance USDT, Bybit USDT and Hyperliquid confirmed millisecond epochs matching UTC datetimes, hour-based intervals,
+and fraction-valued raw funding (different from the website's percent presentation). Direct venue checks identified
+running estimates; `nextfundingtime` was null, so verification uses actual venue funding clocks/settlement history.
+Observations arrived near **HH:59**: the common analysis boundary at the following :05 is the preceding completed
+hour, while entry freshness uses the original source timestamp. Binance and Hyperliquid retained 337 hourly points;
+Bybit had one missing hour and was correctly ineligible under the strict default. Sample history reads took about
+2.3–4.4 s including connections; `EXPLAIN` confirmed the base/exchange/datetime index after materializing the bounded
+market window. These are representative observations, not a guarantee for every market or future query latency.
 
 | Layer | What it does | Where |
 |---|---|---|
@@ -59,8 +116,14 @@ python -m app.tools.paper_demo --scenario stoploss           # true 4x account, 
 python -m app.tools.public_check Bitget OKX Gate "MEXC USDT" "BloFin USDT"  # public read-only connector check
 python -m app.tools.zerodelta_check BTC --offline            # sanity check from saved fixtures
 python -m app.tools.zerodelta_opportunities BTC --offline
+python -m app.tools.settle_paper_trade arb0004 --reason venue_excluded  # bot stopped: close a stranded paper trade at
+                                                 # its last joint prices (dry run; add --apply to write it)
 uvicorn app.main:app --host 127.0.0.1 --port 8000            # paper bot + API
 ```
+
+Only one bot runs per project folder: a second `uvicorn` start (on any port) is refused at once with the process id of
+the first, before it reads the database or calls a venue, because two bots would both manage the same trades. The lock
+is `data/bot.lock`; the system frees it when the first bot stops, however it stops, so it never needs deleting.
 
 Docker (bot + PostgreSQL, API bound to localhost):
 
@@ -113,7 +176,7 @@ Saved-pick windows overlap between sweeps; their estimates are repeated observat
   exactly what they mean in paper mode), and is cross-checked against the venue's position after every cycle: if the two
   ever disagree, the trade goes to DEGRADED until they agree again.
 - **One trade per venue symbol**, and none on a symbol the account already holds or has open orders on.
-- Locked values (4x leverage, 6 h TWAP, $100 child, 45th percentile, 30 %/10 % exits, $5M, 7 days) cannot be loosened
+- Locked values (4x leverage, 6 h TWAP, $100 child, 60th percentile, 8 h of 7-day median funding for spread, 30 %/10 % exits, $5M, 7 days) cannot be loosened
   from the environment.
 - **Same underlying.** Zero Delta groups markets by ticker, and one ticker can name two assets (live: "BB" is BounceBit
   on Binance and BlackBerry stock on Trade.xyz). Both legs' prices must agree within `MAX_LEG_PRICE_GAP_PCT` (5 %) at
@@ -187,6 +250,82 @@ The same data is available as JSON under `/api/*`. Design rules for adding to th
 
 Bodies are `{"actor": "...", "reason": "..."}`. The admin API is disabled unless `ADMIN_API_TOKEN` is set. Put a TLS
 reverse proxy in front of the API, or use an SSH tunnel; do not expose it directly.
+
+Configure and operate the local controls without copying a token into a command or printing it:
+
+```bash
+python -m app.tools.admin setup   # generate a private token in the existing ignored .env; preserves an existing token
+# Restart the bot once to load the token.
+python -m app.tools.admin check   # authenticates with an invalid body, so no trading action is executed
+python -m app.tools.admin pause --reason "maintenance"
+python -m app.tools.admin resume --reason "maintenance complete"
+# Explicit emergency action only when wanted:
+python -m app.tools.admin flatten --reason "operator emergency exit"
+python -m app.tools.admin clear-flatten --reason "incident resolved"
+```
+
+The CLI uses the localhost API. Clearing a flatten leaves entries paused; resume is a separate action.
+
+### Logs
+
+The console shows only what needs attention: warnings, errors, and a few milestone alerts (startup, recovery, trades
+opened and closed, pair selections). Everything else is written to rotating files in `logs/`:
+
+| File | Contents |
+|---|---|
+| `logs/bot.log` | everything the bot decides at `LOG_LEVEL` (default INFO): candidates rejected, alerts, warnings, full tracebacks |
+| `logs/http.log` | every HTTP request the bot makes and every call to its own API. Signatures, API keys and the Telegram token are masked |
+
+Each file rotates at `LOG_MAX_MB` (default 20) and keeps `LOG_BACKUP_COUNT` older files (default 10; `http.log` keeps 3,
+it grows by roughly 60 MB a day with open trades). Set `CONSOLE_LOG_LEVEL=INFO` to see the rest of `bot.log` on the
+console; the HTTP lines never go to the console. `LOG_DIR` moves the folder (a relative path is relative to the project).
+Follow the log live with `Get-Content logs\bot.log -Wait -Tail 30` in PowerShell. The database keeps a durable copy of
+every alert, risk event and decision (`/api/alerts`).
+
+### Reliability diagnostics and paper observation
+
+`/api/overview.runtime_metrics` reports per-venue request/attempt/retry/recovery counts, HTTP statuses, timeout types,
+and loop durations. PostgreSQL queries log their operation, market, elapsed time and scrubbed outcome; the existing
+12-second statement budget remains in force. An individual market timeout produces a partial scan, excludes that
+market, and leaves validated candidates usable. Health stays red for the partial scan and discovery makes at most two
+one-minute retry cycles. Connection/access failures and widespread history timeouts stop new discovery.
+
+`/state.last_scans` and `/api/overview.discovery.screening[].validation` expose missing-hour counts, stale boundaries,
+ambiguous symbols and query failures. PostgreSQL funding checks include both rates and source/reference times. Direct
+estimates captured within one minute of the upstream observation can verify its original prediction; a changed later
+estimate waits, and a final settled rate never substitutes for a historical prediction. The bounded direct-estimate
+buffer is in memory, so it warms up again after a restart. Missing upstream history and the absent summary refresh
+watermark still require evidence from the data provider.
+
+For an exact, credential-free gap report suitable for the data provider:
+
+```bash
+python -m app.tools.zerodelta_db_check --asset BTC --exchange bybit_usdt --days 14 --output logs/bybit-history-check.json
+```
+
+The report lists absent UTC hours in both the seven-day selection and retained-history windows. Incremental history
+reads restart at the earliest cached gap, so an actual upstream backfill becomes visible without restarting the bot;
+an absent observation still fails continuity. Queries remain exact-market, bounded and read-only.
+
+Decisions record assumed income, round-trip costs and break-even hours. Trade details include equivalent full-size
+position hours, integrating actual fills through entry waits and exits. These diagnostics leave the labelled 72-hour
+full-size income assumption visible. `/api/performance.groups` separates shadow research from profit-gated results.
+
+Audit saved fills, funding, fees and P&L independently, or collect a day of read-only observation:
+
+```bash
+python -m app.tools.observe --audit
+python -m app.tools.observe --hours 24 --interval-seconds 60 --output logs/paper-observation.jsonl --audit
+```
+
+The observer calls only GET endpoints, appends one JSON record per sample, and never creates a second trading runtime.
+With `--audit`, it audits at startup, hourly (configurable with `--audit-interval-seconds`) and at completion, including
+trades opened during observation. It records market-validation failures alongside each sample and reports the P&L,
+funding and fee change during the observation window separately from lifetime totals. It reports unhealthy samples,
+API failures and ledger discrepancies in its final record and exit status. Compare the
+request counts, retry rate, cycle times, partial scans and trade states across the observation period. An incomplete
+open-trade valuation is labelled `partial`, rather than presented as an audited profit. Paper P&L uses simulated cashflows
+and labelled fee assumptions; ledger reconciliation does not establish that historical predictions were settled income.
 
 ## Layout
 

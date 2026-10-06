@@ -332,7 +332,7 @@ details[open]>summary::before{transform:rotate(45deg)}
       </section>
 
       <section class="view" data-view="market" aria-labelledby="h-market" hidden>
-        <div class="view-head"><div><h1 id="h-market" tabindex="-1">Market</h1><p>The strongest funding spreads across every coin Zero Delta lists, from the latest sweep (7-day averages, annualised).</p></div></div>
+        <div class="view-head"><div><h1 id="h-market" tabindex="-1">Market</h1><p id="mk-description">The strongest funding spreads across every coin Zero Delta lists, from the latest sweep (7-day averages, annualised).</p></div></div>
         <div class="toolbar"><label class="search"><span id="i-search2"></span><span class="sr">Search pairs</span><input id="mk-q" type="search" placeholder="Search coin or exchange" autocomplete="off"></label>
           <label class="toggle"><input type="checkbox" id="mk-tradable"> Tradable by the bot only</label><span class="count-note" id="mk-count"></span></div>
         <div id="mk-table"></div>
@@ -392,7 +392,9 @@ const OUTCOME = {ENTER: ["good", "Passed", "check-circle"], ENTERED: ["good", "T
 const outChip = o => { const [c, t, i] = OUTCOME[o] || ["", o, "info"]; return `<span class="chip ${c}">${icon(i)}${esc(t)}</span>`; };
 const CHECK = {
   expected_net_edge: "Edge after fees and slippage", low_vol_score: "Volatility too high", volatility_score_available: "Volatility data missing",
-  negative_spread_within_2h_funding: "Entry spread above 2 h of funding", net_funding_positive_over_2h: "Net funding not positive",
+  negative_spread_within_8h_median_funding: "Entry spread above 8 h of 7-day median funding",
+  net_funding_positive_now: "Current net funding not positive", median_funding_positive: "7-day median funding not positive",
+  negative_spread_within_2h_funding: "Old 2 h entry-spread limit", net_funding_positive_over_2h: "Net funding not positive",
   legs_track_same_underlying: "Legs price different assets", legs_can_be_sized_equally: "Legs cannot hold equal size",
   long_funding_rate_matches: "Long funding differs from Zero Delta", short_funding_rate_matches: "Short funding differs from Zero Delta",
   long_funding_interval_matches: "Long funding interval differs", short_funding_interval_matches: "Short funding interval differs",
@@ -407,7 +409,8 @@ const CHECK = {
   long_margin_utilization_high: "long margin ratio high", short_margin_utilization_high: "short margin ratio high",
   equity_at_or_below_controlled_ratio: "a side at or below 30% of its balance", equity_below_emergency_ratio: "a side below 10% of its balance",
   severe_unresolved_delta_imbalance: "hedge imbalance not repaired", delta_imbalance: "hedge imbalance", normal_exit_signal: "funding edge faded",
-  edge_decayed: "funding edge faded", max_hold_reached: "maximum holding time reached", kill_switch_emergency_flatten: "emergency flatten switch"
+  edge_decayed: "funding edge faded", max_hold_reached: "maximum holding time reached", kill_switch_emergency_flatten: "emergency flatten switch",
+  venue_excluded: "exchange no longer used (settled at its last prices)"
 };
 const VENUE = {binance_usdt_m: "Binance", bybit_linear: "Bybit", hyperliquid: "Hyperliquid", "hyperliquid:xyz": "Trade.xyz", okx_swap: "OKX",
   gate_usdt: "Gate", mexc_contract: "MEXC", blofin_swap: "BloFin", bitget_usdt: "Bitget"};
@@ -546,7 +549,7 @@ function narrative(o) {
   }
   if (o.kill_switch.emergency_flatten) { tone = "bad"; ico = "lightning"; parts.push("<b>Emergency flatten is on:</b> everything is being closed."); }
   else if (o.kill_switch.pause_new_entries) { tone = "warn"; ico = "prohibit"; parts.push("New entries are paused."); }
-  return `<div class="banner ${tone}" role="status">${icon(ico)}<div><p>${parts.join(" ")}</p><small>Real prices, simulated money, no real orders. A new sweep of every coin starts ${dur(o.scan_interval_seconds)} after the last one ends; waiting is normal when no pair is worth the fees.</small></div></div>`;
+  return `<div class="banner ${tone}" role="status">${icon(ico)}<div><p>${parts.join(" ")}</p><small>Real prices, simulated money, no real orders. ${o.data_source === "postgres" ? `Database discovery refreshes hourly at :${String(o.discovery_refresh_minute ?? 5).padStart(2, "0")} UTC; only shortlisted markets receive history checks.` : `A new sweep of every coin starts ${dur(o.scan_interval_seconds)} after the last one ends`}; waiting is normal when no pair is worth the fees.</small></div></div>`;
 }
 function renderOverview() {
   const o = data.overview, p = data.perf; if (!o || !p) { setHTML($("ov-kpis"), skeleton(2)); return; }
@@ -708,7 +711,10 @@ function tradeActivity(d) {
 function entryReason(d) {
   const decision = d.decision || {}, checks = decision.checks || [], m = decision.metrics || {}, s = d.entry_snapshot || {};
   const waived = checks.filter(c => !c.passed && c.blocking === "info"), blocked = checks.filter(c => !c.passed && c.blocking !== "info");
-  const label = c => ({expected_net_edge: "Expected edge after fees and slippage", low_vol_score: "Volatility score", negative_spread_within_2h_funding: "Entry spread covered by 2 hours of funding",
+  const label = c => ({expected_net_edge: "Expected edge after fees and slippage", low_vol_score: "Volatility score",
+    negative_spread_within_8h_median_funding: "Entry spread covered by 8 hours of 7-day median funding",
+    net_funding_positive_now: "Positive current net funding", median_funding_positive: "Positive 7-day median funding",
+    negative_spread_within_2h_funding: "Entry spread covered by the old 2-hour limit",
     net_funding_positive_over_2h: "Positive net funding", legs_track_same_underlying: "Prices track the same underlying", legs_can_be_sized_equally: "Equal quantity on both legs"}[c.name] || c.name.replaceAll("_", " "));
   let reason = "The original entry checks were not saved, so the exact admission reason is unavailable.";
   if (checks.length) {
@@ -743,11 +749,11 @@ function entryReason(d) {
 
 /* ---------- the plan: identify, select, simulate, then verify and trade ---------- */
 function picksTable(rows, emptyText) {
-  if (!rows.length) return empty(esc(emptyText), "target");
-  return table([["#", "num"], ["Coin"], ["Long on (pays less)"], ["Short on (earns more)"], ["7-day APR", "num"], ["Now", "num"], ["Steady", "num"], ["Replay (pick week)", "num"], ["Forward trial"], ["Availability"]],
+   if (!rows.length) return empty(esc(emptyText), "target");
+  return table([["#", "num"], ["Coin"], ["Long on (pays less)"], ["Short on (earns more)"], ["7-day APR", "num"], ["Snapshot APR", "num"], ["Steady", "num"], ["Replay (pick week)", "num"], ["Forward trial"], ["Availability"]],
     rows.map(r => { const s = r.simulation;
       return `<tr><td class="num">${r.rank}</td><td><b>${esc(r.asset)}</b>${r.asset_class && r.asset_class !== "crypto" ? ` <span class="tag">${esc(r.asset_class.replace("_", " "))}</span>` : ""}</td><td>${esc(r.long)} <span class="sub">${esc((r.long_type || "").toLowerCase())}</span></td><td>${esc(r.short)} <span class="sub">${esc((r.short_type || "").toLowerCase())}</span></td>
-        <td class="num ${cls(r.score_apr)}">${pct(r.score_apr)}</td><td class="num ${cls(r.now_apr)}">${pct(r.now_apr)}</td><td class="num">${fmt(r.steady * 100, 0)}%</td>
+         <td class="num ${cls(r.score_apr)}">${pct(r.score_apr)}</td><td class="num ${cls(r.now_apr)}">${pct(r.now_apr)}</td><td class="num">${fmt(r.steady * 100, 0)}%${r.spike_diagnostics?.largest_positive_contribution != null ? `<span class="sub">largest hour: ${fmt(r.spike_diagnostics.largest_positive_contribution * 100, 1)}% of positive edge</span><span class="sub">without largest: ${pct(r.spike_diagnostics.mean_without_largest_apr)} APR</span>` : ""}</td>
         <td class="num ${cls(s && s.net)}">${s ? signMoney(s.net) : "n/a"}<span class="sub">${s ? esc((s.exit_reason || "").replaceAll("_", " ")) + (s.price_checked ? "" : " · no prices") : "history unavailable"}</span></td>
         <td>${!r.tradable ? `<span class="muted">—</span>` : fwdChip(r.forward)}${r.forward?.trade_id ? ` <a class="link" href="#/trades/${encodeURIComponent(r.forward.trade_id)}">${esc(r.forward.trade_id)}</a>` : ""}${r.tradable && r.forward?.reason && !r.forward?.trade_id ? `<span class="sub">${esc(plainList(r.forward.entry_wait || r.forward.reason).slice(0, 3).join(" · "))}</span>` : ""}</td>
         <td>${r.tradable ? `<span class="chip good">${icon("check-circle")}Tradable</span>` : `<span class="chip">${icon("prohibit")}Not tradable</span><span class="sub">${esc(r.why_not || "")}</span>`}</td></tr>`; }));
@@ -758,9 +764,9 @@ function renderPlan() {
   $("pl-when").textContent = sel.at ? `Selected ${ago(sel.at)}` : "";
   const step = (n, k, v, d) => `<div class="step"><div class="k"><b>${n}</b>${k}</div><div class="v">${v}</div><p>${d}</p></div>`;
   setHTML($("pl-steps"), [
-    step(1, "Identify", fmt(sw.pairs_total ?? sel.pairs_considered ?? 0, 0) + " pairs", `every coin Zero Delta lists (${sw.assets_scanned ?? "…"} read), each with its last 7 days of funding`),
+    step(1, "Identify", fmt(sw.pairs_total ?? sel.pairs_considered ?? 0, 0) + " pairs", sel.source === "postgres" ? "hourly database summaries screened; shortlisted markets validated against 7 days of history" : `every coin Zero Delta lists (${sw.assets_scanned ?? "…"} read), each with its last 7 days of funding`),
     step(2, "Select", sel.count ? `best ${sel.count}` : "none yet", `one pair per coin, ranked on the 7-day ${sel.metric === "median" ? "median" : "average"} edge, with each leg's exchange named`),
-    step(3, "Simulate", "replay + walk-forward", "each pick replayed through the bot's rules; the same selection tested on a week it could not see"),
+    step(3, "Simulate", sel.source === "postgres" ? "replay + frozen picks" : "replay + walk-forward", sel.source === "postgres" ? "original picks and evidence frozen for a week-later assessment; today's shortlist is not used as a past market universe" : "each pick replayed through the bot's rules; the same selection tested on a week it could not see"),
     step(4, "Verify & trade", `${sw.verified || 0} checked · ${(sw.opened || 0) + (sw.shadow_opened || 0)} opened`, "live checks on the exchanges; spread and volatility re-checked before every slice")
   ].join(""));
   setHTML($("pl-tradable"), picksTable(tradable, "None of the top pairs can be traded yet: they need an exchange connector the bot does not have."));
@@ -772,7 +778,7 @@ function renderPlan() {
   const tile = (l, v, klass = "") => `<div class="fstep"><div class="v ${klass}">${v}</div><div class="l">${l}</div></div>`;
   setHTML($("pl-wf"), src.length ? `<div class="funnel" style="grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:16px">${sum ? [tile("picks tested", sum.picks), tile("pick-week replay promised", signMoney(sum.predicted_net), cls(sum.predicted_net)), tile("unseen week actually paid", signMoney(sum.realised_net), cls(sum.realised_net)), tile("made money", `${sum.profitable} of ${sum.picks}`, sum.profitable ? "pos" : "neg")].join("") : ""}</div>
     ${cmp(src)}${series.length ? `<div class="mt">${timeChart(series, {w: slotWidth("full") - 2, label: "Estimated net profit of last week's picks during the unseen week", fmt: v => signMoney(v), lines: [{at: 0, color: "var(--axis)", label: "break-even"}]})}</div>` : ""}`
-    : empty("Needs two complete weeks of shared funding history.", "clock"));
+     : empty(wf.status === "prospective_only" ? "Prospective assessment: today's shortlist cannot reconstruct last week's full market universe. Frozen picks mature after seven days." : "Needs two complete weeks of shared funding history.", "clock"));
   const track = (sel.track_record || []).filter(r => r.kind === "tradable").slice(0, 12);
   setHTML($("pl-track"), track.length ? cmp(track.map(r => ({...r, realised: r.result}))) : empty("Building a track record: the first saved picks mature seven days after they were made.", "hourglass"));
   $("pl-note").textContent = "The pick-week replay is an in-sample diagnostic. Walk-forward and track-record figures are hourly estimates: today's volume filter, assumed fees and slippage, no historical spread or 1-minute volatility, no venue basis. Forward trials use live venue data and the real engine. All figures are paper money.";
@@ -786,9 +792,17 @@ function renderScanner() {
   setHTML($("sc-state"), pr.running ? `<span class="chip info">${icon("pulse")}Sweeping · ${pr.done} of ${pr.total}</span>` : sw.aborted ? `<span class="chip bad">${icon("warning")}Stopped early: ${esc(sw.aborted)}</span>` : sw.assets_total ? `<span class="chip good">${icon("check-circle")}Complete</span>` : "");
   const steps = [["coins listed", sw.assets_total], ["coins read", sw.assets_scanned], ["coins with pairs", sw.assets_with_pairs], ["possible pairs", sw.pairs_total], ["tradable here", sw.tradable_pairs], ["checked live", sw.verified], ["passed every check", sw.passed || 0]];
   const max = Math.max(1, ...steps.map(s => s[1] || 0));
-  setHTML($("sc-funnel"), (pr.running ? `<div class="chart-cap"><span>Reading coins from Zero Delta</span><b>${pr.done} / ${pr.total}</b></div><div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="${pr.total}" aria-valuenow="${pr.done}" aria-label="Sweep progress" style="margin-bottom:16px"><i style="width:${pr.total ? pr.done / pr.total * 100 : 0}%"></i></div>` : "")
+   let funnel = (pr.running ? `<div class="chart-cap"><span>Reading coins from Zero Delta</span><b>${pr.done} / ${pr.total}</b></div><div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="${pr.total}" aria-valuenow="${pr.done}" aria-label="Sweep progress" style="margin-bottom:16px"><i style="width:${pr.total ? pr.done / pr.total * 100 : 0}%"></i></div>` : "")
     + (sw.assets_total ? `<div class="funnel">${steps.map(([l, v], i) => `<div class="fstep ${i === steps.length - 1 ? "end" : ""}"><div class="v">${fmt(v || 0, 0)}</div><div class="l">${l}</div><div class="bar"><i style="width:${Math.max(2, (v || 0) / max * 100)}%"></i></div></div>`).join("")}</div>
-      ${sw.assets_failed ? `<p class="note">${sw.assets_failed} coin(s) could not be read this time.</p>` : ""}` : empty("The first sweep is still running.", "hourglass")));
+       ${sw.assets_failed ? `<p class="note">${sw.assets_failed} coin(s) could not be read this time.</p>` : ""}` : empty("The first sweep is still running.", "hourglass"));
+   const discovery = o.discovery || {};
+   if (o.data_source === "postgres") {
+     funnel += `<p class="note">PostgreSQL · ${fmt(discovery.summary_rows, 0)} venue summaries · analysis boundary ${dt(discovery.as_of)} · fetched ${dt(discovery.fetched_at)}. ${discovery.summary_refresh_verified ? "Upstream refresh verified." : "Upstream summary refresh marker unavailable; selected raw-market coverage is checked separately."}</p>
+       <details data-key="database-screening"><summary>Provisional screening: ${(discovery.screening || []).length} researched pairs</summary>
+       ${(discovery.screening || []).length ? table([["Coin"], ["Long"], ["Short"], ["Summary APR difference", "num"], ["History"]], discovery.screening.map(r => `<tr><td>${esc(r.asset)}</td><td>${esc(r.long)}</td><td>${esc(r.short)}</td><td class="num">${pct(r.provisional_apr)}</td><td>${r.history_status === "validated" ? "Validated" : "Not kept: history incomplete, or current edge not positive"}</td></tr>`)) : empty("No eligible summary pairs in this batch.")}
+       <p class="note">Final rankings cover the history-validated shortlist. Summary ranks are preliminary, before fees and live checks.</p></details>`;
+   }
+   setHTML($("sc-funnel"), funnel);
   const b = o.top_blockers || [], bmax = Math.max(1, ...b.map(x => x.count));
   setHTML($("sc-blockers"), b.length ? b.map(x => `<div class="hbar"><span>${esc(plainReason(x.plain === x.check ? x.check : x.plain))}</span><div class="track" aria-hidden="true"><i style="width:${x.count / bmax * 100}%"></i></div><span class="num" style="text-align:right">${x.count}</span></div>`).join("") + `<p class="note">Counted over the last 200 live checks. One pair can fail several checks at once.</p>` : empty("No rejections recorded yet."));
   const sev = ui.severity, al = (data.alerts || []).filter(a => sev === "all" || a.severity !== "info");
@@ -804,11 +818,12 @@ function renderScanner() {
 
 /* ---------- market ---------- */
 function renderMarket() {
-  const rows0 = (data.opps || {}).pairs; if (!rows0) { setHTML($("mk-table"), skeleton(5)); return; }
+   const rows0 = (data.opps || {}).pairs; if (!rows0) { setHTML($("mk-table"), skeleton(5)); return; }
+   $("mk-description").textContent = data.opps.source === "postgres" ? "Best funding spreads among the history-validated database shortlist. Market-wide summary ranks are provisional (see Scanner)." : "The strongest funding spreads across every coin Zero Delta lists, from the latest sweep (7-day averages, annualised).";
   const q = ($("mk-q").value || "").trim().toLowerCase(), onlyT = $("mk-tradable").checked;
   const rows = rows0.filter(r => (!onlyT || r.executable) && (!q || [r.asset, r.long, r.short].join(" ").toLowerCase().includes(q)));
   $("mk-count").textContent = `${rows.length} of ${rows0.length} pairs`;
-  setHTML($("mk-table"), rows.length ? table([["Coin"], ["Long (pays less)"], ["Short (earns more)"], ["Type"], ["7-day avg APR", "num"], ["Right now", "num"], ["Steady", "num"], ["Sign flips", "num"], ["Tradable"]],
+   setHTML($("mk-table"), rows.length ? table([["Coin"], ["Long (pays less)"], ["Short (earns more)"], ["Type"], ["7-day avg APR", "num"], ["Snapshot APR", "num"], ["Steady", "num"], ["Sign flips", "num"], ["Tradable"]],
     rows.map(r => `<tr><td><b>${esc(r.asset)}</b></td><td>${esc(r.long)}</td><td>${esc(r.short)}</td><td class="muted">${esc(r.type)}</td><td class="num ${cls(r.mean_apr)}">${pct(r.mean_apr)}</td><td class="num ${cls(r.now_apr)}">${pct(r.now_apr)}</td><td class="num">${fmt(r.positive_ratio * 100, 0)}%</td><td class="num">${r.sign_flips}</td>
       <td>${r.executable ? `<span class="chip good">${icon("check-circle")}Yes</span>` : `<span class="chip">${icon("prohibit")}No connector</span>`}</td></tr>`), {tall: true})
     : empty(rows0.length ? "No pair matches these filters." : "Waiting for the first sweep.", "magnifying-glass"));
@@ -835,10 +850,10 @@ function renderSettings() {
   const L = o.locked, kv = (l, v) => `<dt>${l}</dt><dd>${v}</dd>`;
   setHTML($("st-rules"), `<div class="card"><h2 style="margin-bottom:12px">Fixed by the specification</h2><dl class="kv">
       ${kv("Maximum leverage", `${L.max_leverage}x`)}${kv("Entry time (TWAP)", `${L.twap_minutes / 60} hours, both legs together`)}${kv("Largest slice", `$${L.child_usd} per side`)}
-      ${kv("Volatility limit", `≤ ${L.low_vol_percentile}th percentile (1-minute data)`)}${kv("Negative entry spread", "at most 2 hours of funding")}
+      ${kv("Volatility limit", `≤ ${L.low_vol_percentile}th percentile (1-minute data)`)}${kv("Negative entry spread", `at most ${L.spread_horizon_hours} hours of 7-day median funding`)}
       ${kv("Slow exit", `at ${fmt(L.controlled_exit_ratio * 100, 0)}% of a side's starting balance, over 3 hours`)}${kv("Emergency exit", `below ${fmt(L.emergency_exit_ratio * 100, 0)}%, in about 1 minute`)}
       ${kv("Stocks", "no entry within 3 days of earnings")}</dl></div>
-    <div class="card"><h2 style="margin-bottom:12px">Chosen for paper mode</h2><dl class="kv">${kv("Size per side", `$${fmt(o.limits.target_notional_per_leg_usd, 0)}`)}${kv("Leverage", `${o.limits.leverage}x`)}${kv("Maximum open trades", o.limits.max_concurrent_trades)}${kv("Sweep repeats", `${dur(o.scan_interval_seconds)} after the last one ends`)}</dl>
+    <div class="card"><h2 style="margin-bottom:12px">Chosen for paper mode</h2><dl class="kv">${kv("Size per side", `$${fmt(o.limits.target_notional_per_leg_usd, 0)}`)}${kv("Leverage", `${o.limits.leverage}x`)}${kv("Maximum open trades", `${o.limits.max_concurrent_trades} <span class="muted">(shadow research trades are not counted)</span>`)}${kv("Sweep repeats", `${dur(o.scan_interval_seconds)} after the last one ends`)}${kv("Exchanges not used", o.excluded_venues && o.excluded_venues.length ? esc(o.excluded_venues.join(", ")) : "none")}</dl>
       <details class="mt" data-key="paper-defaults"><summary>${o.paper_defaults_in_use.length} settings use labelled paper defaults</summary><p class="mono muted" style="font-size:.8rem;margin-top:6px">${o.paper_defaults_in_use.map(esc).join(", ")}</p></details></div>`);
   const comps = Object.entries(o.health), bad = comps.filter(([, c]) => !c.ok).length;
   setHTML($("st-health-sum"), bad ? `<span class="chip bad">${icon("warning-circle")}${bad} problem${bad > 1 ? "s" : ""}</span>` : `<span class="chip good">${icon("check-circle")}All healthy</span>`);

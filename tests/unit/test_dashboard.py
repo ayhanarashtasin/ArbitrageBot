@@ -117,7 +117,7 @@ def test_entry_explanation_keeps_shadow_override_and_frozen_funding():
     assert waived["passed"] is False and waived["blocking"] == "info"
     snapshot = d["entry_snapshot"]
     assert snapshot["min_expected_net_edge_bps"] == 5000
-    assert snapshot["low_vol_max_percentile"] == 45
+    assert snapshot["low_vol_max_percentile"] == 60
     assert snapshot["mean_funding_apr_pct"] == pytest.approx(262.8)
     assert snapshot["funding"][1]["interval_hours"] == 8
     assert snapshot["funding"][1]["rate_pct"] == pytest.approx(0.24)
@@ -230,6 +230,24 @@ def test_performance_before_any_trade_is_empty_not_broken():
     s = p["summary"]
     assert s["closed_trades"] == 0 and s["open_trades"] == 0 and s["win_rate"] is None
     assert s["net_pnl_total"] == 0 and p["cumulative"] == [] and p["per_trade"] == []
+
+
+def test_shadow_results_and_partial_position_time_are_reported_separately():
+    rig = Rig(params_kw={"shadow_paper_enabled": True, "min_expected_net_edge_bps": 5000})
+    rig.scan()
+    asyncio.run(rig.engine.run_once())
+    rig.clock.advance(hours=1)
+    asyncio.run(rig.engine.run_once())  # second slice is not due until minute 72
+    c, _ = make(rig)
+    detail = c.get("/api/trades/arb0001").json()
+    assert detail["economics"]["group"] == "shadow_research"
+    assert detail["economics"]["equivalent_full_size_hours"]["long"] == pytest.approx(0.2)
+    assert detail["economics"]["equivalent_full_size_hours"]["short"] == pytest.approx(0.2)
+    assert detail["entry_snapshot"]["breakeven_hours"] > 0
+    p = c.get("/api/performance").json()
+    assert p["groups"]["shadow_research"]["trades"] == 1
+    assert p["groups"]["profit_gated"]["trades"] == 0
+    assert p["groups"]["shadow_research"]["net_pnl"] == pytest.approx(p["summary"]["net_pnl_total"])
 
 
 def test_open_trade_profit_matches_the_account_equity_change():

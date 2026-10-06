@@ -2,6 +2,10 @@ class ZeroDeltaError(Exception):
     """Base class for all Zero Delta provider errors."""
 
 
+class ZeroDeltaAccessError(ZeroDeltaError):
+    """Database authentication or table permission failure (not an HTTP session error)."""
+
+
 class ZeroDeltaConfigError(ZeroDeltaError):
     """Required configuration is missing or invalid."""
 

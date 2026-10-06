@@ -1,7 +1,7 @@
 """Live low-volatility filter (project.md section 22, LOCKED).
 
     low_vol_score = max(underlying_rv_percentile, basis_volatility_percentile)
-    entry allowed only if low_vol_score <= 45; otherwise WAIT (never a permanent rejection)
+    entry allowed only if low_vol_score <= 60; otherwise WAIT (never a permanent rejection)
 
 Definitions chosen here, because project.md gives only the names:
   underlying RV     rolling population stdev of 1-minute log returns of the underlying's price
@@ -102,5 +102,5 @@ def candles_needed(params) -> int:
 
 
 def entry_allowed(score: VolScore, max_percentile: Decimal) -> bool:
-    """LOCKED boundary: a score of exactly 45 passes, 46 waits."""
+    """LOCKED boundary: a score of exactly 60 passes; anything higher waits."""
     return score.available and score.low_vol_score is not None and score.low_vol_score <= max_percentile

@@ -212,3 +212,44 @@ def test_time_indexes_are_added_to_an_existing_database_and_used_by_the_prune(tm
         "EXPLAIN QUERY PLAN DELETE FROM zerodelta_markets WHERE received_at < '2026-09-29 00:00:00'"))
     assert "ix_zerodelta_markets_received_at" in plan
     con.close()
+
+
+def test_old_summary_batches_and_equity_snapshots_are_pruned_but_recent_ones_and_trades_are_kept(tmp_path):
+    """A summary batch is ~2 MB an hour and nothing reads one back; equity snapshots are ~25,000 rows a day. Both used
+    to grow without limit (the database went from 221 MB to 314 MB in 21 hours)."""
+    from app.persistence import models as m
+    from app.persistence.repository import EQUITY_SNAPSHOT_KEEP_DAYS, SUMMARY_BATCH_KEEP_DAYS
+
+    assert SUMMARY_BATCH_KEEP_DAYS * 24 > 7 * 24 + 1  # the week-later assessment of a pick (7 days + 1 h) is covered
+    r, clock = repo()
+    new_trade(r)
+
+    def batch(batch_id, as_of):
+        r.save_summary_batch({"id": batch_id, "as_of": as_of.isoformat(), "fetched_at": as_of.isoformat(), "markets": []})
+
+    clock.advance(days=40)
+    now = clock.now()
+    batch("old", now - timedelta(days=SUMMARY_BATCH_KEEP_DAYS + 1))
+    batch("recent", now - timedelta(days=SUMMARY_BATCH_KEEP_DAYS - 1))
+    for age_days, ratio in ((EQUITY_SNAPSHOT_KEEP_DAYS + 1, "0.9"), (1, "1.1")):
+        clock._now = now - timedelta(days=age_days)
+        r.add_equity_snapshot("arb0001", long_equity=D(250), short_equity=D(250), long_ratio=D(ratio),
+                              short_ratio=D(ratio), net_delta_usd=D(0))
+    clock._now = now
+    r.prune_discovery()
+    with r.session() as s:
+        assert [b.id for b in s.query(m.ZeroDeltaSummaryBatch)] == ["recent"]
+        assert [str(e.long_ratio) for e in s.query(m.EquitySnapshot)] == ["1.1"]
+        assert s.query(m.Trade).count() == 1  # trades are never pruned
+
+
+def test_the_equity_snapshot_time_index_exists_so_the_prune_does_not_scan_the_table(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "snap.db"
+    Repository(f"sqlite:///{path}", ManualClock(T0)).engine.dispose()
+    con = sqlite3.connect(path)
+    plan = " ".join(str(row) for row in con.execute(
+        "EXPLAIN QUERY PLAN DELETE FROM equity_snapshots WHERE recorded_at < '2026-09-01 00:00:00'"))
+    con.close()
+    assert "ix_equity_snapshots_recorded_at" in plan

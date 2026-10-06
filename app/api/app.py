@@ -6,6 +6,7 @@ ADMIN_API_TOKEN; when that variable is unset the admin endpoints are disabled en
 
 import asyncio
 import hmac
+import logging
 from contextlib import asynccontextmanager
 
 from pathlib import Path
@@ -16,8 +17,35 @@ from pydantic import BaseModel, Field
 
 from app.api import dashboard as dash
 from app.bootstrap import Runtime, build_runtime
+from app.core.instance_lock import InstanceLock
 
 STATIC = Path(__file__).resolve().parent / "static"
+log = logging.getLogger(__name__)
+
+RUNNER_STOP_WAIT_SECONDS = 20  # how long shutdown waits for the loops to finish their current step
+RUNNER_CANCEL_WAIT_SECONDS = 5  # and, once they are cancelled, for the cancellation to take effect
+
+
+async def stop_runner(runner, task: asyncio.Task | None) -> None:
+    """Ask the runner to stop and wait for it. Never raises for the runner's own outcome.
+
+    A runner that overruns is cancelled and a failed one is logged. Neither may stop the caller from closing the
+    connections afterwards: before this, a sweep still running at shutdown made it time out, fail with a traceback and
+    skip the close.
+    """
+    runner.stop()
+    if task is None:
+        return
+    done, _ = await asyncio.wait({task}, timeout=RUNNER_STOP_WAIT_SECONDS)
+    if not done:
+        log.warning("the runner did not stop within %s s and is being cancelled", RUNNER_STOP_WAIT_SECONDS)
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=RUNNER_CANCEL_WAIT_SECONDS)
+        if not done:
+            log.error("the runner ignored the cancellation; closing without it")
+            return
+    if not task.cancelled() and task.exception() is not None:
+        log.error("the runner ended with an error", exc_info=task.exception())
 
 
 class AdminAction(BaseModel):
@@ -30,16 +58,24 @@ def create_app(runtime: Runtime | None = None, *, start_runner: bool = True) -> 
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        rt = runtime or build_runtime()
-        holder["rt"] = rt
-        task = asyncio.create_task(rt.runner.run()) if start_runner else None
+        # A real start (no ready-made runtime) takes the one-bot lock before it reads the database or calls a venue.
+        lock = InstanceLock() if runtime is None else None
+        if lock is not None:
+            lock.acquire()
         try:
-            yield
+            rt = runtime or build_runtime()
+            holder["rt"] = rt
+            task = asyncio.create_task(rt.runner.run()) if start_runner else None
+            try:
+                yield
+            finally:
+                try:
+                    await stop_runner(rt.runner, task)
+                finally:
+                    await rt.aclose()
         finally:
-            rt.runner.stop()
-            if task is not None:
-                await asyncio.wait_for(task, timeout=20) if not task.done() else None
-            await rt.aclose()
+            if lock is not None:
+                lock.release()
 
     app = FastAPI(title="Funding arbitrage bot", lifespan=lifespan)
 
@@ -63,7 +99,7 @@ def create_app(runtime: Runtime | None = None, *, start_runner: bool = True) -> 
         return {
             "bot": "funding arbitrage bot",
             "run_mode": r.params.run_mode,
-            "live_trading_enabled": False,
+            "live_trading_enabled": r.params.run_mode == "live",
             "active_trades": len(r.engine.active),
             "entries_allowed": r.kill.entries_allowed,
             "links": {"dashboard": "/dashboard", "health": "/health", "state": "/state", "api_docs": "/docs"},
@@ -120,8 +156,8 @@ def create_app(runtime: Runtime | None = None, *, start_runner: bool = True) -> 
     @app.get("/health")
     def health():
         r = rt()
-        return {"ok": r.health.all_ok, "run_mode": r.params.run_mode, "live_trading_enabled": False,
-                "components": r.health.snapshot()}
+        return {"ok": r.health.all_ok, "run_mode": r.params.run_mode,
+                "live_trading_enabled": r.params.run_mode == "live", "components": r.health.snapshot()}
 
     @app.get("/state")
     def state():
@@ -131,9 +167,11 @@ def create_app(runtime: Runtime | None = None, *, start_runner: bool = True) -> 
             "run_mode": r.params.run_mode,
             "kill_switch": {"pause_new_entries": r.kill.pause_new_entries, "emergency_flatten": r.kill.emergency_flatten},
             "new_trades_blocked": blocked,
+            "discovery": dict(r.scanner.discovery),
             "active_trades": r.engine.summary(),
             "last_scans": {a: {"pairs": s.pairs_found, "verified": s.verified, "opened": s.opened,
-                               "outcomes": s.outcomes, "note": s.note} for a, s in r.scanner.last_report.items()},
+                                "outcomes": s.outcomes, "note": s.note,
+                                "market_validation": s.market_validation} for a, s in r.scanner.last_report.items()},
             "paper_defaults_in_use": sorted(k for k, v in r.params.provenance.items() if v == "paper_default"),
         }
 

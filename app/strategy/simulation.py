@@ -17,8 +17,8 @@ A replay of the pair's real hourly funding (Zero Delta) through the way the bot 
 Approximations, stated plainly: funding accrues hourly from Zero Delta's normalised rate (venues really settle every
 1 to 8 hours); both legs are valued at the same underlying price (the basis between venues is ignored, so the hedge's
 price P&L is zero and only the equity of each separate account moves); a slice fills at the hour's closing price;
-the volatility wait and the 2 h spread rule need order books and 1-minute data that no history holds, so they are
-applied only in the forward (paper) simulation; fees are configured assumptions and slippage is flat.
+ the volatility wait needs 1-minute candles and the 8 h median-funding spread rule needs live books, neither of which
+ hourly history holds, so these checks apply only in the forward (paper) simulation; fees are configured assumptions and slippage is flat.
 The percent-per-hour edge is used exactly as stored.
 """
 

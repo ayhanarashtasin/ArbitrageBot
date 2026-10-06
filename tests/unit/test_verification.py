@@ -58,13 +58,13 @@ def test_happy_path_enters_and_records_metrics():
     assert "p_long_buy" in d.metrics and "low_vol_score" in d.metrics
 
 
-def test_volatility_above_45_waits_not_rejects():
-    d = run(vol=VolScore(True, D(46), D(10), D(46), 1000, 1000))
+def test_volatility_above_60_waits_not_rejects():
+    d = run(vol=VolScore(True, D(61), D(10), D(61), 1000, 1000))
     assert d.outcome is Outcome.WAIT and failed(d) == {"low_vol_score"}
 
 
-def test_volatility_exactly_45_passes():
-    assert run(vol=VolScore(True, D(45), D(10), D(45), 1000, 1000)).outcome is Outcome.ENTER
+def test_volatility_exactly_60_passes():
+    assert run(vol=VolScore(True, D(60), D(10), D(60), 1000, 1000)).outcome is Outcome.ENTER
 
 
 def test_missing_volatility_data_waits():
@@ -105,15 +105,26 @@ def test_reject_outranks_wait():
     assert d.outcome is Outcome.REJECT
 
 
-def test_negative_spread_larger_than_two_hours_of_funding_rejects():
+def test_negative_spread_larger_than_eight_hours_of_median_funding_rejects():
     wide_short = book(bids=[(99.5 - i * 0.01, 100) for i in range(20)], asks=[(99.6 + i * 0.01, 100) for i in range(20)])
     d = run(short=data("0.0003", wide_short))
-    assert d.outcome is Outcome.REJECT and "negative_spread_within_2h_funding" in failed(d)
+    assert d.outcome is Outcome.REJECT and "negative_spread_within_8h_median_funding" in failed(d)
+
+
+def test_spread_uses_seven_day_median_for_eight_hour_allowance():
+    pair = make_pair()
+    pair = pair.model_copy(update={"stats": pair.stats.model_copy(update={"median": D("0.02")})})
+    # Cost is about 12 bps: above 2 hours of current funding, but below 8 hours of the 7-day median.
+    short_book = deep_book(mid="99.89", spread=D("0.02"))
+    d = run(short=data("0.0003", short_book), pair=pair)
+    assert d.outcome is Outcome.ENTER
+    assert "negative_spread_within_8h_median_funding" not in failed(d)
+    assert d.metrics["expected_net_funding_8h_median"] == "0.00160000"
 
 
 def test_non_positive_net_funding_rejects():
     d = run(long=data("0.0003"), short=data("0.0003"), pair=make_pair(long_pct=0.03, short_pct=0.03))
-    assert d.outcome is Outcome.REJECT and "net_funding_positive_over_2h" in failed(d)
+    assert d.outcome is Outcome.REJECT and "net_funding_positive_now" in failed(d)
 
 
 def test_insufficient_depth_rejects():
@@ -134,7 +145,7 @@ def test_slippage_limit_enforced():
 
 
 def test_thin_edge_after_fees_rejects_once_the_threshold_is_set():
-    tight = deep_book(now=T0, spread=D("0.004"))  # keeps the 2h spread rule satisfied
+    tight = deep_book(now=T0, spread=D("0.004"))  # keeps the 8 h median-funding spread rule satisfied
     explicit = TradingSettings(_env_file=None, min_expected_net_edge_bps=10).resolve()
     d = evaluate_entry(make_pair(short_pct=0.003, mean_pct=0.003), data("0", tight), data("0.00003", tight), CALM,
                        explicit, now=T0)
@@ -206,3 +217,15 @@ def test_zero_delta_is_cross_checked_against_the_settled_rate_as_well_as_the_est
     wrong = zero_delta_mismatch(pair, funding("0.0004", interval=1), short, PARAMS.zero_delta_mismatch_tolerance_per_hour,
                                 (D("0.0004"), None))  # a sign or symbol error matches neither
     assert not next(c for c in wrong if c.name == "long_funding_rate_matches").passed
+
+
+def test_cost_breakdown_and_breakeven_reconcile_with_the_entry_gate():
+    d = run()
+    m = d.metrics
+    costs = sum(D(m[k]) for k in ("entry_fees_bps", "exit_fees_bps", "adverse_spread_bps",
+                                  "entry_slippage_bps", "exit_slippage_estimate_bps"))
+    assert abs(costs - D(m["round_trip_cost_bps"])) < D("0.000001")
+    assert abs(D(m["expected_funding_income_bps"]) - costs - D(m["expected_net_edge_bps"])) < D("0.0001")
+    rate = D(m["conservative_net_funding_per_hour"])
+    assert D(m["breakeven_hours"]) * rate * 10000 == costs
+    assert D(m["breakeven_hours"]) < D(m["expected_hold_hours"])

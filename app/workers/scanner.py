@@ -7,7 +7,7 @@ SELECT    the best 1-3 pairs across all coins (one pair per coin), ranked on the
 SIMULATE  each pick is replayed through the bot's own rules (6 h TWAP, $100 slices, fees, 4x accounts, the 30 % and 10 %
           equity exits, the normal exit). The same selection is also run as it would have been a week ago and replayed
           on the following week (walk-forward): the honest test of whether picking this way makes money.
-VERIFY    only the selected tradable pairs go to the direct-venue checks (executable prices, 2 h spread rule, volatility,
+VERIFY    only the selected tradable pairs go to direct-venue checks (executable prices, 8 h median-funding spread,
           earnings, equal sizing, Zero Delta cross-check). ENTER opens a paper trade: the forward simulation.
 WATCH     selected pairs that are waiting (usually for low volatility) are re-checked every minute until they enter or
           the next sweep replaces them.
@@ -18,7 +18,7 @@ which the engine manages from the venues alone (sections 6, 38).
 
 import asyncio
 import logging
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -30,7 +30,7 @@ from app.core.config import ZeroDeltaSettings
 from app.core.trading_config import DEFAULT_PAPER_FEE_BPS, PAPER_FEES_BPS, ResolvedParams
 from app.domain.market import InstrumentMeta
 from app.exchanges.base import ExchangeAdapter, ExchangeError
-from app.exchanges.registry import binding_for
+from app.exchanges.registry import binding_for, is_excluded
 from app.execution.engine import STALE_BOOK_RETRY_SECONDS, TradeEngine
 from app.execution.venue_provider import UnsupportedVenue
 from app.market_data.earnings import CRYPTO, EarningsCalendar, asset_class
@@ -42,7 +42,8 @@ from app.providers.zerodelta.models import AssetAnalysis
 from app.providers.zerodelta.provider import MAX_HOURLY_DAYS
 from app.strategy.instruments import parse_market_identifier
 from app.strategy.pairs import PairAnalytics, generate_pairs
-from app.strategy.selection import Pick, rank, select, why_not_tradable
+from app.strategy.selection import Pick, rank, select, why_not_tradable, screen_summary
+from app.providers.zerodelta.exceptions import ZeroDeltaAccessError
 from app.strategy.simulation import Bar, SimRules, simulate_pair
 from app.strategy.verification import Decision, LegData, Outcome, evaluate_entry
 
@@ -74,6 +75,18 @@ def scan_stale_seconds(params: ResolvedParams) -> float:
     health older than this is stale, and a venue-pair entry this old no longer describes a pair the bot uses."""
     return 2 * params.scan_interval_seconds + 1800.0
 
+
+def _failure_text(exc: BaseException) -> str:
+    """What failed, in words. A TaskGroup wraps the real error in an ExceptionGroup whose own text is only
+    "unhandled errors in a TaskGroup (1 sub-exception)" (live 2026-10-03: the outage alert hid a database timeout).
+
+    Provider errors are already scrubbed of connection strings and credentials; any other error gives its type only.
+    """
+    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+        exc = exc.exceptions[0]
+    return str(exc) if isinstance(exc, ZeroDeltaError) else type(exc).__name__
+
+
 @dataclass
 class ScanReport:
     asset: str
@@ -89,6 +102,7 @@ class ScanReport:
     zero_delta_eligible_markets: int = 0
     total_markets: int = 0
     top_pairs: list[dict] = field(default_factory=list)  # best pairs by 7-day mean edge, for display only
+    market_validation: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -100,15 +114,21 @@ class _Kept:
     newest: datetime | None = None  # last hourly point: the selection week is (newest - 7 d, newest]
     tradfi_hint: bool = False  # listed on a Zero Delta venue that carries stocks
     received_at: datetime | None = None
+    source_time: datetime | None = None
 
 
 class Scanner:
     def __init__(self, *, params: ResolvedParams, zd_settings: ZeroDeltaSettings, zd: ZeroDeltaProvider | None,
                  source_for_venue: Callable[[str], ExchangeAdapter | None], repo: Repository, engine: TradeEngine,
                  notifier: Notifier, clock: Clock, health=None, earnings: EarningsCalendar | None = None,
-                 execution_venue: Callable[[str], bool] | None = None):
+                 execution_venue: Callable[[str], bool] | None = None,
+                 excluded_venues: frozenset[str] = frozenset()):
         self.params, self.zd_settings, self.zd = params, zd_settings, zd
-        self._source_for = source_for_venue  # market data: every venue with a public adapter
+        # Market data: every venue with a public adapter, except EXCLUDE_VENUES. An excluded venue is never selected,
+        # verified or read for prices; trades already open on it stay with the engine, which has its own lookup.
+        self.excluded_venues = excluded_venues
+        self._source_for = source_for_venue if not excluded_venues else (
+            lambda venue: None if is_excluded(venue, excluded_venues) else source_for_venue(venue))
         # Live mode: only venues with credentials that passed their readiness check can be TRADED. None = paper mode,
         # where every venue with an adapter can be traded on paper.
         self.execution_venue = execution_venue
@@ -131,6 +151,19 @@ class Scanner:
         self._selected_keys: set[tuple] = set()
         self._parked: dict[tuple, tuple[datetime, str]] = {}  # pair key -> (set aside until, failed checks)
         self._enter_lock = asyncio.Lock()  # the sweep and the watch never open the same pair twice
+        self.discovery: dict = {}
+        self._db_markets: dict[str, set[str]] = {}
+        self._db_symbols: dict[str, dict[str, str]] = {}
+        self._db_candidate_assets: set[str] = set()
+        self._excluded_assets: set[str] = set()
+        self._funding_estimates: dict[tuple[str, str], deque] = {}
+        # Set when the bot is shutting down. A sweep then fetches no more coins and opens no trade: a sweep takes
+        # minutes, and shutdown must not wait for one that nobody will read.
+        self.stopping = False
+
+    @property
+    def database_source(self) -> bool:
+        return self.zd_settings.source == "postgres"
 
     # ---- Zero Delta ---------------------------------------------------------------------------
     async def _analysis(self, asset: str) -> tuple[AssetAnalysis | None, str | None, str]:
@@ -138,7 +171,11 @@ class Scanner:
         if self.zd is None:
             return None, "no_zd", "Zero Delta is not configured"
         try:
-            analysis = await self.zd.fetch_asset(asset, keep_days=HISTORY_KEEP_DAYS)
+            kwargs = {"exchanges": sorted(self._db_markets.get(asset, set())),
+                      "symbols": self._db_symbols.get(asset)} if self.database_source else {}
+            analysis = await self.zd.fetch_asset(asset, keep_days=HISTORY_KEEP_DAYS, **kwargs)
+        except ZeroDeltaAccessError as exc:
+            return None, "access", str(exc)
         except ZeroDeltaAuthError as exc:
             return None, "auth", str(exc)
         except ZeroDeltaRateLimitError as exc:
@@ -147,6 +184,10 @@ class Scanner:
             return None, "error", f"{asset}: {type(exc).__name__}: {exc}"
         lag_limit = timedelta(hours=float(self.params.zero_delta_history_max_lag_hours))
         newest = self._newest(analysis)
+        if self.database_source:
+            # Each market and pair already requires coverage through analysis_end. Retain their precise reasons,
+            # including missing tails and query timeouts, rather than throwing away the whole asset analysis.
+            return analysis, None, ""
         if newest is None or self.clock.now() - newest > lag_limit:
             return None, "stale", f"{asset}: newest history point is {newest}"
         return analysis, None, ""
@@ -157,6 +198,7 @@ class Scanner:
                    default=None)
 
     async def _zd_failure(self, kind: str, message: str) -> None:
+        self.watch = []
         self.repo.add_provider_event(kind.upper(), message)
         if self.health:
             self.health.mark("zero_delta", False, kind, stale_after=scan_stale_seconds(self.params))
@@ -196,10 +238,15 @@ class Scanner:
         if inst is None:
             raise UnsupportedVenue(f"unrecognised market identifier {leg.market_identifier!r}")
         meta: InstrumentMeta = await adapter.resolve_symbol(inst.base, inst.quote, inst.settle)
-        return meta, await adapter.get_candles(meta.symbol, "1m", candles_needed(self.params))
+        return meta, await adapter.get_closed_candles(meta.symbol, "1m", candles_needed(self.params))
 
     async def _snapshot(self, adapter: ExchangeAdapter, meta: InstrumentMeta) -> LegData:
         funding, book = await asyncio.gather(adapter.get_funding_info(meta.symbol), adapter.get_order_book(meta.symbol))
+        key = (adapter.name, meta.symbol)
+        estimates = self._funding_estimates.setdefault(key, deque(maxlen=512))
+        estimates.append(funding)
+        while len(self._funding_estimates) > 64:
+            self._funding_estimates.pop(next(iter(self._funding_estimates)))
         fee, verified = self._leg_fee(adapter)
         try:
             schedule = await adapter.get_fee_schedule(meta.symbol)
@@ -212,6 +259,7 @@ class Scanner:
             if schedule is not None and schedule.verified:
                 fee, verified = schedule.taker_fraction, True
         settled = None
+        history = []
         try:  # the venue's last SETTLED rate: what Zero Delta shows, for the cross-check
             history = await adapter.get_funding_history(meta.symbol, 3)
             if history and funding.interval_hours:
@@ -219,7 +267,7 @@ class Scanner:
         except (ExchangeError, ValueError) as exc:
             log.info("no settled funding for %s on %s: %s", meta.symbol, adapter.name, exc)
         return LegData(meta=meta, funding=funding, book=book, taker_fee=fee, fee_verified=verified,
-                       settled_rate_per_hour=settled)
+                        settled_rate_per_hour=settled, settled_history=tuple(history), predicted_history=tuple(estimates))
 
     async def verify_pair(self, pair: PairAnalytics, zd_age_seconds: float | None = 0.0) -> Decision | None:
         long_src, short_src = self._source_for(pair.long_leg.venue_name), self._source_for(pair.short_leg.venue_name)
@@ -275,6 +323,9 @@ class Scanner:
         """The coins to scan. "ALL" means every coin Zero Delta lists, most liquid first."""
         excl = {a.upper() for a in (excluded or [])}
         wanted = [a.upper() for a in configured]
+        self._excluded_assets = excl
+        if self.database_source:
+            return [a for a in wanted if a not in excl]  # scan_all reads ONE summary, including for ALL
         if "ALL" not in wanted:
             return [a for a in wanted if a not in excl]
         names: list[str] = []
@@ -309,7 +360,7 @@ class Scanner:
         """(pairs now, the same coin's pairs one week earlier). Reads only its arguments: safe in a worker thread."""
         pairs = [p for p in generate_pairs(analysis, self.zd_settings) if p.status == "OK" and p.stats]
         earlier = [p for p in generate_pairs(analysis, self.zd_settings, as_of=newest - WEEK)
-                   if p.status == "OK" and p.stats] if newest else []
+                   if p.status == "OK" and p.stats] if newest and analysis.source != "postgres" else []
         return pairs, earlier
 
     async def _discover(self, asset: str):
@@ -328,8 +379,22 @@ class Scanner:
         # that also runs the trades and the API is not held for it (two big coins at once paused it ~2 s per sweep).
         pairs, earlier = await asyncio.to_thread(self._candidate_pairs, analysis, newest)
         self._persist_discovery(analysis, pairs)
+        report.market_validation = [{"venue": m.snapshot.venue_name, "exchange": m.snapshot.exchange_key,
+            "symbol": m.snapshot.market_identifier, "eligible": m.eligible, "reasons": list(m.reasons),
+            "source_time": m.snapshot.timestamp.isoformat() if m.snapshot.timestamp else None,
+            "coverage": m.coverage.model_dump(mode="json") if m.coverage else None} for m in analysis.markets]
+        report.market_validation += [{"venue": i.venue, "eligible": False, "reasons": [i.code],
+                                      "detail": i.message} for i in analysis.issues]
+        report.zero_delta_ok = not any(i.code == "QUERY_TIMEOUT" for i in analysis.issues)
+        if analysis.source == "postgres":
+            for market in report.market_validation:
+                if not market["eligible"]:
+                    log.info("history excluded %s / %s: %s%s", asset, market["venue"], ", ".join(market["reasons"]),
+                             f" ({market['detail']})" if market.get("detail") else "")
         report.pairs_found = len(pairs)
         report.total_markets = len(analysis.markets)
+        if analysis.source == "postgres" and analysis.issues:
+            report.note = "; ".join(f"{i.venue}: {i.message}" for i in analysis.issues)[:500]
         report.zero_delta_eligible_markets = sum(1 for m in analysis.markets if m.eligible)
         report.executable_pairs = sum(1 for p in pairs if self._tradable(p))
         keep, keep_earlier = self._keep(pairs), self._keep(earlier)
@@ -339,6 +404,8 @@ class Scanner:
                 venues.update((saved.long_venue, saved.short_venue))
         kept = _Kept(asset, {v: analysis.histories[v] for v in venues if v in analysis.histories}, newest,
                      any(m.snapshot.venue_name in TRADFI_VENUE_HINTS for m in analysis.markets), analysis.received_at)
+        kept.source_time = min((m.snapshot.timestamp for m in analysis.markets if m.eligible
+                                and m.snapshot.timestamp is not None), default=None)
         report.top_pairs = [dict(self._pair_row(p), asset=asset, executable=self._tradable(p))
                             for p in rank(pairs, self.params.selection_metric)[:5]]
         return report, kept, keep, keep_earlier, None
@@ -441,7 +508,7 @@ class Scanner:
     # ---- step 2: select -------------------------------------------------------------------------
     def _pick_row(self, pick: Pick, simulation: dict | None) -> dict:
         p = pick.pair
-        return {
+        row = {
             "rank": pick.rank, "asset": p.asset, "long": p.long_leg.venue_name, "short": p.short_leg.venue_name,
             "long_type": p.long_leg.venue_type.value, "short_type": p.short_leg.venue_type.value,
             "types_verified": p.long_leg.venue_type_verified and p.short_leg.venue_type_verified,
@@ -453,7 +520,18 @@ class Scanner:
             "replay_kind": "in_sample_diagnostic",
             "pair": p.model_dump(mode="json"), "params": self.params.model_dump(mode="json"),
             "forward": {"status": "pending" if pick.tradable else "unavailable", "reason": pick.why_not},
+            "source": "postgres" if self.database_source else "dash",
+            "batch_id": self.discovery.get("batch_id"),
+            "spike_diagnostics": {
+                "largest_positive_contribution": None if p.stats.largest_positive_contribution is None else float(p.stats.largest_positive_contribution),
+                "top_three_positive_contribution": None if p.stats.top_three_positive_contribution is None else float(p.stats.top_three_positive_contribution),
+                "mean_without_largest_apr": None if p.stats.mean_without_largest is None else float(p.stats.mean_without_largest * 8760)},
         }
+        if self.database_source and p.asset in self._found:
+            kept = self._found[p.asset][0]
+            row["funding_evidence"] = {v: [o.model_dump(mode="json") for o in kept.histories.get(v, ())]
+                                       for v in (p.long_leg.venue_name, p.short_leg.venue_name)}
+        return row
 
     def _select(self, pairs: list[PairAnalytics], *, with_earnings: bool = True) -> tuple[list[Pick], list[Pick]]:
         """with_earnings=False is the walk-forward replay of an earlier week: today's earnings blackout and today's
@@ -463,7 +541,9 @@ class Scanner:
                       require_live_edge=self.params.selection_require_live_edge,
                       blocked=(lambda p: self._earnings_block.get(p.asset) or self._parked_reason(p))
                       if with_earnings else None,
-                      missing_label="not enabled for live trading:" if self.execution_venue else "no adapter yet for")
+                      missing_label=("not enabled for live trading:" if self.execution_venue else
+                                     "excluded (EXCLUDE_VENUES) or no adapter yet for" if self.excluded_venues else
+                                     "no adapter yet for"))
 
     def _parked_reason(self, pair: PairAnalytics) -> str | None:
         entry = self._parked.get(self._key(pair))
@@ -494,6 +574,10 @@ class Scanner:
         "predicted" is the replay of the week the pair was picked on (what an in-sample replay promises);
         "realised" is the following week, which the selection could not see.
         """
+        if self.database_source:
+            return {"status": "prospective_only", "limitations": [
+                "Today's shortlist is not a historical market-wide universe; retrospective selection is not reported.",
+                "Original hourly summary batches and picks are frozen for week-later assessment."]}
         earlier = [p for _, _, prev in found.values() for p in prev]
         if not earlier:
             return {}
@@ -546,6 +630,8 @@ class Scanner:
         rule_check = self._walk_forward(found)
         live_edge_dropped = sum(1 for p in rank(all_pairs, self.params.selection_metric) if p.current_funding_edge <= 0)
         selection = {"at": self.clock.now().isoformat(), "count": self.params.selection_count,
+                      "source": "postgres" if self.database_source else "dash",
+                      "discovery": dict(self.discovery),
                      "metric": self.params.selection_metric, "assets": list(found), "pairs_considered": total_pairs,
                      "one_per_asset": self.params.selection_one_per_asset,
                      "require_live_edge": self.params.selection_require_live_edge,
@@ -596,7 +682,7 @@ class Scanner:
                 if self._key(pair) in busy or pair.asset in opened_assets or any(a == pair.asset for a, _, _ in busy):
                     self._forward_status(pair, "active", "an existing trial already covers this asset")
                     continue
-                at = found[pair.asset][0].received_at
+                at = self._provider_time(found[pair.asset][0])
                 age = (self.clock.now() - at).total_seconds() if at else None
                 decision = await self.verify_pair(pair, zd_age_seconds=age)
                 if decision is None:
@@ -631,7 +717,8 @@ class Scanner:
                 if self._key(pair) in busy or any(a == pair.asset for a, _, _ in busy):
                     continue
                 kept = self._found.get(pair.asset, (None,))[0]
-                age = (self.clock.now() - kept.received_at).total_seconds() if kept and kept.received_at else None
+                at = self._provider_time(kept) if kept else None
+                age = (self.clock.now() - at).total_seconds() if at else None
                 decision = await self.verify_pair(pair, zd_age_seconds=age)
                 if decision is None:
                     self._forward_status(pair, "waiting", "direct venue data unavailable")
@@ -660,6 +747,8 @@ class Scanner:
         sweep at once (nothing is retried or worked around); an isolated bad coin is skipped, and many errors in a row
         abort it as an outage.
         """
+        if self.database_source:
+            return await self._scan_postgres(assets)
         started = self.clock.now()
         self._due_selections = self.repo.due_selections()
         self.progress = {"running": True, "done": 0, "total": len(assets), "started_at": started.isoformat(),
@@ -674,7 +763,7 @@ class Scanner:
 
         async def one(asset: str) -> None:
             async with sem:
-                if state["abort"]:
+                if state["abort"] or self.stopping:
                     return
                 report, kept, pairs, earlier, failure = await self._discover(asset)
                 await self.clock.sleep(delay)
@@ -692,6 +781,9 @@ class Scanner:
                 state["abort"] = reason if reason in ("auth", "rate_limit") else "outage"
 
         await asyncio.gather(*(one(a) for a in assets))
+        if self.stopping:  # a half-fetched sweep is neither an outage nor a basis for trades
+            self.progress = {**self.progress, "running": False, "finished_at": self.clock.now().isoformat()}
+            return [reports[a] for a in assets if a in reports]
 
         attempted, ok = len(reports), len(found)
         if state["abort"] == "auth":
@@ -753,6 +845,141 @@ class Scanner:
             log.exception("could not prune old discovery rows")
         return [reports[a] for a in assets if a in reports]
 
+    def _provider_time(self, kept: _Kept) -> datetime | None:
+        return (kept.source_time or kept.received_at) if self.database_source else kept.received_at
+
+    async def _scan_postgres(self, assets: list[str]) -> list[ScanReport]:
+        """Summary-first discovery; only shortlist markets and due frozen picks reach the raw table."""
+        started = self.clock.now()
+        self._due_selections = self.repo.due_selections()
+        self.progress = {"running": True, "done": 0, "total": 0, "started_at": started.isoformat()}
+        found, reports = {}, {}
+        try:
+            if self.zd is None:
+                raise ZeroDeltaError("Zero Delta database is not configured")
+            batch = await self.zd.refresh_summary()
+            self.repo.save_summary_batch(batch.model_dump(mode="json"))
+            pool = screen_summary(batch, None if "ALL" in assets else set(assets), self._excluded_assets,
+                self.zd_settings.min_avg_24h_volume_usd, self.zd_settings.research_pair_limit, self._exec_source)
+            self._db_markets, self._db_symbols = {}, {}
+            self._db_candidate_assets = {p["asset"] for p in pool}
+            for p in pool:
+                self._db_markets.setdefault(p["asset"], set()).update((p["long_exchange"], p["short_exchange"]))
+            for saved in self._due_selections:
+                for role in ("long", "short"):
+                    leg = (saved.detail.get("pair") or {}).get(role + "_leg") or {}
+                    exchange = leg.get("exchange_key")
+                    if exchange is None:
+                        matches = [m.exchange for m in batch.markets if m.coin == saved.asset
+                                   and m.venue_name == getattr(saved, role + "_venue")]
+                        exchange = matches[0] if len(matches) == 1 else None
+                    if exchange and leg.get("market_identifier"):
+                        self._db_markets.setdefault(saved.asset, set()).add(exchange)
+                        self._db_symbols.setdefault(saved.asset, {})[exchange] = leg["market_identifier"]
+            self.discovery = {"source": "postgres", "batch_id": batch.id, "as_of": batch.as_of.isoformat(),
+                "fetched_at": batch.fetched_at.isoformat(), "summary_rows": len(batch.markets),
+                "summary_refresh_verified": batch.refresh_verified,
+                "scope": "best among history-validated shortlist; summary ranks are provisional",
+                "research_pair_limit": self.zd_settings.research_pair_limit, "screening": pool,
+                "summary_issues": [i.model_dump(mode="json") for i in batch.issues]}
+            self.progress["total"] = len(self._db_markets)
+            sem = asyncio.Semaphore(self.zd_settings.db_concurrency)
+
+            async def one(asset):
+                async with sem:
+                    if self.stopping:
+                        return
+                    report, kept, pairs, earlier, failure = await self._discover(asset)
+                reports[asset] = report
+                self.progress["done"] += 1
+                if failure is None:
+                    found[asset] = (kept, pairs, earlier)
+                elif failure[0] in ("error", "access", "auth"):
+                    raise ZeroDeltaError(failure[1])
+
+            # All requests finish/cancel before this batch is published or rejected.
+            async with asyncio.TaskGroup() as tasks:
+                for asset in self._db_markets:
+                    tasks.create_task(one(asset))
+            if self.stopping:
+                return list(reports.values())
+            validated = [p for _, pairs, _ in found.values() for p in pairs]
+            self.discovery["validated_pairs"] = len(validated)
+            timeouts = sum("QUERY_TIMEOUT" in m["reasons"] for r in reports.values() for m in r.market_validation)
+            attempted = sum(len(r.market_validation) for r in reports.values())
+            self.discovery["market_query_timeouts"] = timeouts
+            for screened in pool:
+                matches = [p for p in validated if p.asset == screened["asset"] and
+                    {p.long_leg.venue_name, p.short_leg.venue_name} == {screened["long"], screened["short"]}]
+                screened["history_status"] = "validated" if matches else "insufficient_or_invalid"
+                report = reports.get(screened["asset"])
+                screened["validation"] = [m for m in report.market_validation
+                    if m["venue"] in {screened["long"], screened["short"]}] if report else []
+            viable = any(p.asset in self._db_candidate_assets for p in validated)
+            if timeouts and (not viable or (timeouts >= MAX_CONSECUTIVE_ERRORS and timeouts * 2 >= attempted)):
+                await self._zd_failure("zero_delta_outage", f"{timeouts}/{attempted} selected market history queries timed out")
+            elif pool and not viable:
+                await self._zd_failure("zero_delta_stale_data", "No screened pair has complete current hourly coverage")
+            else:
+                self._zd_alerted = None
+                if self.health:
+                    detail = (f"partial batch: {timeouts} market query timeout(s); validated markets remain usable" if timeouts
+                              else "summary read; selected raw-market coverage checked; upstream summary refresh marker unavailable")
+                    self.health.mark("zero_delta", not timeouts, detail, stale_after=scan_stale_seconds(self.params))
+            self._found = found
+            total = sum(r.pairs_found for r in reports.values())
+            await self._select_and_simulate(found, total)
+            await self._score_saved_picks(found)
+            if self._zd_alerted is None:
+                # A permanently incompatible pick does not waste a slot until the next hour.
+                for attempt in range(len(pool) + 1):
+                    if self.stopping:
+                        break
+                    parked_before = len(self._parked)
+                    pairs = [p for _, ps, _ in found.values() for p in ps]
+                    _, picks = self._select(pairs)
+                    await self._verify_and_enter(picks, found, reports)
+                    if len(self._parked) == parked_before:
+                        break
+                    await self._select_and_simulate(found, total)
+            self.last_report = reports
+            self.last_top_pairs = sorted([row for r in reports.values() for row in r.top_pairs],
+                                         key=lambda r: -r["mean_apr"])[:60]
+            self.sweep = {"source": "postgres", "assets_total": len({m.coin for m in batch.markets}),
+                "assets_scanned": len(found), "assets_failed": sum(not r.zero_delta_ok for r in reports.values()),
+                "assets_skipped": len({m.coin for m in batch.markets}) - len(reports),
+                "pairs_total": total, "tradable_pairs": sum(r.executable_pairs for r in reports.values()),
+                "assets_with_pairs": sum(bool(r.pairs_found) for r in reports.values()),
+                "passed": sum(r.outcomes.get("ENTER", 0) for r in reports.values()),
+                "verified": sum(r.verified for r in reports.values()),
+                "opened": sum(len(r.opened) for r in reports.values()),
+                "shadow_opened": sum(len(r.shadow_opened) for r in reports.values()),
+                "watching": len(self.watch), "aborted": self._zd_alerted, "market_query_timeouts": timeouts,
+                "partial": bool(timeouts), "discovery": dict(self.discovery),
+                "started_at": started.isoformat(), "finished_at": self.clock.now().isoformat(),
+                "duration_seconds": (self.clock.now() - started).total_seconds()}
+            if self.health:
+                self.health.mark("scanner", self._zd_alerted is None and not timeouts,
+                    f"{len(pool)} screened; {len(validated)} shortlisted pairs validated"
+                    + (f"; partial: {timeouts} market query timeout(s)" if timeouts else ""),
+                    stale_after=scan_stale_seconds(self.params))
+            try:
+                self.repo.prune_discovery()
+            except Exception:  # housekeeping must never interrupt the independent trade engine
+                log.exception("could not prune old database discovery rows")
+        except (ZeroDeltaError, ExceptionGroup) as exc:
+            # ExceptionGroup comes from TaskGroup. Provider exceptions are already scrubbed by the transport.
+            self._found, self.watch = {}, []
+            self.discovery["provider_status"] = "unavailable"
+            await self._zd_failure("zero_delta_outage", _failure_text(exc)[:200])
+            self.sweep = {"source": "postgres", "aborted": "outage", "opened": 0,
+                          "started_at": started.isoformat(), "finished_at": self.clock.now().isoformat()}
+            if self.health:
+                self.health.mark("scanner", False, "database discovery failed", stale_after=scan_stale_seconds(self.params))
+        finally:
+            self.progress.update(running=False, finished_at=self.clock.now().isoformat())
+        return list(reports.values())
+
     async def scan_asset(self, asset: str) -> ScanReport:
         reports = await self.scan_all([asset])
         return reports[0] if reports else ScanReport(asset, zero_delta_ok=False, note="not scanned")
@@ -765,7 +992,10 @@ class Scanner:
         return {"long": p.long_leg.venue_name, "short": p.short_leg.venue_name, "type": p.pair_type,
                 "mean_apr": float(st.mean * apr), "median_apr": float(st.median * apr),
                 "now_apr": float(p.current_funding_edge * apr), "stddev_apr": float(st.stddev * apr),
-                "positive_ratio": float(st.positive_edge_ratio), "sign_flips": st.sign_flip_count,
+                 "positive_ratio": float(st.positive_edge_ratio), "sign_flips": st.sign_flip_count,
+                 "largest_positive_contribution": None if st.largest_positive_contribution is None else float(st.largest_positive_contribution),
+                 "top_three_positive_contribution": None if st.top_three_positive_contribution is None else float(st.top_three_positive_contribution),
+                 "mean_without_largest_apr": None if st.mean_without_largest is None else float(st.mean_without_largest * apr),
                 "hours": p.coverage.coverage_hours, "executable": False,
                 "min_volume_usd": float(min(p.long_leg.avg_24h_volume_usd, p.short_leg.avg_24h_volume_usd))}
 
@@ -801,7 +1031,9 @@ class Scanner:
         except (RuntimeError, ExchangeError, UnsupportedVenue, *DB_OUTAGE_ERRORS) as exc:
             # a trade that cannot be recorded is not opened (DB_OUTAGE_ERRORS: the database is locked or down)
             report.note = f"not opened: {type(exc).__name__}: {exc}"[:300]
-            log.warning("could not open trade: %s", exc)
+            # A plain RuntimeError is the engine's deliberate refusal (trial capacity, a portfolio limit, the kill
+            # switch): routine and repeated every scan, so INFO. Anything else is a failure worth a warning.
+            log.log(logging.INFO if type(exc) is RuntimeError else logging.WARNING, "could not open trade: %s", exc)
             return False
         (report.shadow_opened if shadow else report.opened).append(trade.id)
         self._forward_status(pair, "shadow" if shadow else "paper", trade_id=trade.id)
@@ -870,6 +1102,8 @@ class Scanner:
         self._found = {}
         saved = self.repo.latest_selection()
         self.last_selection = saved
+        if self.database_source:
+            return  # revalidate a database batch before admitting a restored pick
         for row in saved.get("tradable", []):
             if not row.get("pair"):
                 continue

@@ -29,6 +29,10 @@ log = logging.getLogger(__name__)
 # Connection-level failures only. Integrity errors are bugs and must never be swallowed.
 DB_OUTAGE_ERRORS = (OperationalError, InterfaceError, PoolTimeoutError)
 SQLITE_BUSY_TIMEOUT_SECONDS = 30
+# Retention. A summary batch is about 2 MB an hour; nothing in the app reads one back, and the week-later assessment
+# of a pick needs 7 days + 1 h. Equity snapshots are ~25,000 rows a day; the dashboard shows a trade's latest 400.
+SUMMARY_BATCH_KEEP_DAYS = 10
+EQUITY_SNAPSHOT_KEEP_DAYS = 30
 
 
 def _sqlite_wal(dbapi_connection, _record) -> None:
@@ -140,6 +144,12 @@ class Repository:
                 s.add(m.KeyValue(key=key, value=_json_safe(value), updated_at=self.clock.now()))
             else:
                 row.value, row.updated_at = _json_safe(value), self.clock.now()
+
+    def save_summary_batch(self, batch: dict) -> None:
+        with self.session() as s:
+            if s.get(m.ZeroDeltaSummaryBatch, batch["id"]) is None:
+                s.add(m.ZeroDeltaSummaryBatch(id=batch["id"], as_of=datetime.fromisoformat(batch["as_of"]),
+                    fetched_at=datetime.fromisoformat(batch["fetched_at"]), detail=_json_safe(batch)))
 
     # ---- decisions and alerts ------------------------------------------------------------------
     def add_decision(self, *, asset: str, long_venue: str, short_venue: str, outcome: str, checks: list[dict],
@@ -374,15 +384,25 @@ class Repository:
                                   .order_by(m.EquitySnapshot.id.desc()).limit(limit)))
         return rows[::-1]
 
-    def prune_discovery(self, keep_hours: int = 72) -> None:
-        """Drop old per-scan discovery rows. Trades, decisions and selections are never pruned."""
+    def prune_discovery(self, keep_hours: int = 72, keep_batch_days: int = SUMMARY_BATCH_KEEP_DAYS,
+                        keep_snapshot_days: int = EQUITY_SNAPSHOT_KEEP_DAYS) -> None:
+        """Drop old per-scan discovery rows, old summary batches and old equity snapshots.
+
+        Trades, decisions and selections are never pruned. The week-later assessment needs a batch for 7 days + 1 h, and
+        the dashboard reads only the latest 400 snapshots of a trade, so neither of the other two is needed for long.
+        """
         from datetime import timedelta
         from sqlalchemy import delete
-        cutoff = self.clock.now() - timedelta(hours=keep_hours)
+        now = self.clock.now()
+        cutoff = now - timedelta(hours=keep_hours)
         with self.session() as s:
             s.execute(delete(m.ZeroDeltaMarket).where(m.ZeroDeltaMarket.received_at < cutoff))
             s.execute(delete(m.ZeroDeltaHistory).where(m.ZeroDeltaHistory.recorded_at < cutoff))
             s.execute(delete(m.ZeroDeltaProviderEvent).where(m.ZeroDeltaProviderEvent.recorded_at < cutoff))
+            s.execute(delete(m.ZeroDeltaSummaryBatch)
+                      .where(m.ZeroDeltaSummaryBatch.as_of < now - timedelta(days=keep_batch_days)))
+            s.execute(delete(m.EquitySnapshot)
+                      .where(m.EquitySnapshot.recorded_at < now - timedelta(days=keep_snapshot_days)))
 
     def latest_selection(self) -> dict:
         """The most recent saved selection, rebuilt from the database (empty dict if none)."""
@@ -509,7 +529,7 @@ def _get_kv(self: Repository, key: str) -> dict | None:
 
 Repository.set_kv = _resilient(_set_kv)  # type: ignore[method-assign]
 Repository.get_kv = _get_kv  # type: ignore[method-assign]
-for _name in ("record", "record_many", "audit", "add_decision", "mark_alert_delivered", "add_risk_event", "add_provider_event", "update_trade",
+for _name in ("record", "record_many", "save_summary_batch", "audit", "add_decision", "mark_alert_delivered", "add_risk_event", "add_provider_event", "update_trade",
               "merge_context", "upsert_leg", "record_slice", "upsert_order", "add_fill", "add_equity_snapshot",
               "add_position_snapshot", "add_funding_payment", "save_paper_account", "release_lease", "set_state"):
     setattr(Repository, _name, _resilient(getattr(Repository, _name)))

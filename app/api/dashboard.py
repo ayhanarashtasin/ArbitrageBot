@@ -20,7 +20,11 @@ PLAIN = {
     "expected_net_edge": "Funding gap too small after fees and slippage",
     "low_vol_score": "Market too volatile right now (waiting for calm)",
     "volatility_score_available": "Not enough price history to judge volatility",
-    "negative_spread_within_2h_funding": "Price difference between venues costs more than 2 hours of funding",
+    "negative_spread_within_8h_median_funding": "Price difference exceeds 8 hours of 7-day median funding",
+    "net_funding_positive_now": "Current funding difference is not positive",
+    "median_funding_positive": "7-day median funding difference is not positive",
+    # Keep labels for decisions recorded before the 8-hour median rule.
+    "negative_spread_within_2h_funding": "Price difference exceeds the old 2-hour funding limit",
     "net_funding_positive_over_2h": "Funding difference is not positive",
     "long_book_fresh": "Long venue order book too old", "short_book_fresh": "Short venue order book too old",
     "long_book_depth_sufficient": "Long venue book too thin", "short_book_depth_sufficient": "Short venue book too thin",
@@ -68,6 +72,7 @@ def overview(rt: Runtime) -> dict[str, Any]:
             "eligible_markets": r.zero_delta_eligible_markets, "pairs": r.pairs_found,
             "executable_pairs": r.executable_pairs, "verified": r.verified, "outcomes": r.outcomes,
             "opened": r.opened, "note": r.note,
+            "market_validation": r.market_validation,
         }
     trades = rt.repo.all_trades()
     open_trades = [t for t in trades if TradeState(t.state) not in TERMINAL]
@@ -77,12 +82,22 @@ def overview(rt: Runtime) -> dict[str, Any]:
         "now": now.isoformat(),
         "uptime_seconds": (now - STARTED_AT).total_seconds() if now >= STARTED_AT else 0,
         "mode": rt.params.run_mode,
-        "live_trading_enabled": False,
+        "live_trading_enabled": rt.params.run_mode == "live",  # the bot refuses to start in live mode unless gated
         "kill_switch": {"pause_new_entries": rt.kill.pause_new_entries, "emergency_flatten": rt.kill.emergency_flatten},
         "blocked_reason": rt.engine.blocked(),
         "health": rt.health.snapshot(),
         "database_ok": rt.repo.db_ok, "database_backlog": rt.repo.backlog_size,
+        "runtime_metrics": {"loops": dict(getattr(rt.runner, "loop_metrics", {})),
+                            "public_http": {a.name: a._http.diagnostics() for a in rt.adapters.values()
+                                            if hasattr(a, "_http")},
+                            "zero_delta_db": rt.zd._postgres.diagnostics()
+                                if rt.zd and getattr(rt.zd, "_postgres", None) and hasattr(rt.zd._postgres, "diagnostics")
+                                else {}},
         "scan_interval_seconds": rt.params.scan_interval_seconds,
+        "data_source": "postgres" if rt.scanner.database_source else "dash",
+        "discovery_refresh_minute": rt.scanner.zd_settings.refresh_minute,
+        "excluded_venues": sorted(rt.scanner.excluded_venues),
+        "discovery": dict(rt.scanner.discovery),
         "assets": rt.settings.scan_assets,
         "scans": dict(sorted(scans.items(), key=lambda kv: (-kv[1]["verified"], -kv[1]["executable_pairs"]))[:24]),
         "sweep": {**rt.scanner.sweep, "progress": rt.scanner.progress},
@@ -94,10 +109,11 @@ def overview(rt: Runtime) -> dict[str, Any]:
                    "target_notional_per_leg_usd": str(rt.params.target_notional_per_leg_usd),
                    "leverage": str(rt.params.target_leverage)},
         "locked": {"max_leverage": str(rt.params.max_allowed_leverage),
-                   "twap_minutes": rt.params.twap_entry_duration_minutes,
-                   "child_usd": str(rt.params.twap_max_child_notional_usd),
-                   "low_vol_percentile": str(rt.params.low_vol_max_percentile),
-                   "controlled_exit_ratio": str(rt.params.controlled_exit_equity_ratio),
+                    "twap_minutes": rt.params.twap_entry_duration_minutes,
+                    "child_usd": str(rt.params.twap_max_child_notional_usd),
+                    "low_vol_percentile": str(rt.params.low_vol_max_percentile),
+                    "spread_horizon_hours": rt.params.funding_screening_horizon_minutes // 60,
+                    "controlled_exit_ratio": str(rt.params.controlled_exit_equity_ratio),
                    "emergency_exit_ratio": str(rt.params.emergency_exit_equity_ratio)},
         "paper_defaults_in_use": sorted(k for k, v in rt.params.provenance.items() if v == "paper_default"),
         "explicit_parameters": sorted(k for k, v in rt.params.provenance.items() if v == "explicit"),
@@ -115,6 +131,10 @@ def decisions(rt: Runtime, limit: int = 60) -> list[dict[str, Any]]:
             "low_vol_score": d.metrics.get("low_vol_score"),
             "entry_spread_pct": d.metrics.get("entry_spread_pct"),
             "net_funding_per_hour": d.metrics.get("net_funding_per_hour"),
+            "breakeven_hours": d.metrics.get("breakeven_hours"),
+            "expected_hold_hours": d.metrics.get("expected_hold_hours"),
+            "round_trip_cost_bps": d.metrics.get("round_trip_cost_bps"),
+            "income_assumption": d.metrics.get("income_assumption"),
             "trade_id": d.trade_id,
             "checks": [{"name": c["name"], "passed": c["passed"], "value": c["value"], "limit": c["limit"],
                         "blocking": c.get("blocking", "reject")}
@@ -123,9 +143,10 @@ def decisions(rt: Runtime, limit: int = 60) -> list[dict[str, Any]]:
     return out
 
 
-def opportunities(rt: Runtime) -> dict[str, list[dict[str, Any]]]:
+def opportunities(rt: Runtime) -> dict[str, Any]:
     """The best pairs across every coin scanned, by 7-day average funding (display order, not a score)."""
-    return {"pairs": rt.scanner.last_top_pairs}
+    return {"pairs": rt.scanner.last_top_pairs, "source": "postgres" if rt.scanner.database_source else "dash",
+            "scope": rt.scanner.discovery.get("scope", "all scanned assets")}
 
 
 def selection(rt: Runtime) -> dict[str, Any]:
@@ -138,6 +159,9 @@ def selection(rt: Runtime) -> dict[str, Any]:
     made_at = datetime.fromisoformat(out["at"]) if out.get("at") else None
     for kind in ("overall", "tradable"):
         for row in out.get(kind, []):
+            evidence = row.pop("funding_evidence", None)
+            if evidence is not None:
+                row["evidence_samples"] = {v: len(points) for v, points in evidence.items()}
             matches = [t for t in trials if (t.asset, t.long_venue, t.short_venue) ==
                        (row["asset"], row["long"], row["short"])]
             if matches:
@@ -277,7 +301,16 @@ def performance(rt: Runtime) -> dict[str, Any]:
     best = max(closed, key=lambda r: r["money"]["net"], default=None)
     worst = min(closed, key=lambda r: r["money"]["net"], default=None)
     both = closed + open_live
+    groups = {}
+    for name, is_shadow in (("shadow_research", True), ("profit_gated", False)):
+        valued = [r for r in both if r["shadow"] == is_shadow]
+        done = [r for r in closed if r["shadow"] == is_shadow]
+        groups[name] = {"trades": sum(r["shadow"] == is_shadow for r in rows), "closed_trades": len(done),
+            "net_pnl": total("net", valued), "funding": total("funding", valued), "fees": total("fees", valued),
+            "price_pnl": total("price", valued),
+            "win_rate": sum(r["money"]["net"] > 0 for r in done) / len(done) if done else None}
     return {
+        "groups": groups,
         "summary": {
             "closed_trades": len(closed), "open_trades": len(open_), "wins": len(wins),
             "shadow_trades": sum(r["shadow"] for r in rows),
@@ -360,6 +393,8 @@ def _entry_snapshot(t, observations=()) -> dict[str, Any]:
     """Frozen discovery rates and thresholds, never today's selection or configuration."""
     ctx = t.context or {}
     pair, params = ctx.get("zero_delta") or {}, ctx.get("params") or {}
+    metrics = (ctx.get("decision") or {}).get("metrics") or {}
+    breakeven = metrics.get("breakeven_hours")
     funding = []
     for role in ("long", "short"):
         leg = pair.get(role + "_leg") or {}
@@ -378,8 +413,24 @@ def _entry_snapshot(t, observations=()) -> dict[str, Any]:
         "min_expected_net_edge_bps": _f(params.get("min_expected_net_edge_bps")),
         "low_vol_max_percentile": _f(params.get("low_vol_max_percentile")),
         "expected_hold_hours": _f(params.get("expected_hold_hours")),
+        "breakeven_hours": _f(breakeven) if breakeven not in (None, "unreachable") else None,
         "twap_entry_duration_minutes": params.get("twap_entry_duration_minutes"),
     }
+
+
+def _exposure_hours(orders, context, until) -> dict[str, float | None]:
+    """Integrate filled base quantity over real fill times, as hours at the originally planned full quantity."""
+    quantities = (context.get("entry_plan") or {}).get("slice_qty") or []
+    target = sum((Decimal(q) for q in quantities), Decimal(0))
+    if target <= 0:
+        return {"long": None, "short": None}
+    out = {}
+    for leg in ("long", "short"):
+        hours = sum(((Decimal(1) if o.side == "BUY" else Decimal(-1)) * o.filled_quantity
+            * Decimal(str(max(0, (until - as_utc(o.updated_at)).total_seconds()))) / 3600
+            for o in orders if o.leg == leg), Decimal(0))
+        out[leg] = float(abs(hours) / target)
+    return out
 
 
 def trade_detail(rt: Runtime, trade_id: str) -> dict[str, Any]:
@@ -389,6 +440,7 @@ def trade_detail(rt: Runtime, trade_id: str) -> dict[str, Any]:
     ctx = t.context or {}
     funding = rt.repo.funding_payments(trade_id)
     orders = rt.repo.orders_for(trade_id)
+    active = rt.engine.active.get(trade_id)
     base = (t.baseline_long_equity or 0) + (t.baseline_short_equity or 0)
     pnl_series = [{"at": _iso(e.recorded_at), "pnl": float(e.long_equity + e.short_equity - base)}
                   for e in eq if e.long_equity is not None and e.short_equity is not None and base]
@@ -404,6 +456,11 @@ def trade_detail(rt: Runtime, trade_id: str) -> dict[str, Any]:
         "target_per_leg_usd": float(t.target_notional_per_leg), "leverage": float(t.leverage),
         "baseline_long_equity": _f(t.baseline_long_equity), "baseline_short_equity": _f(t.baseline_short_equity),
         "pnl": t.pnl, "money": _pnl_numbers(rt, t), "timing": _timing(rt, t), "pnl_series": pnl_series,
+        "valuation_marks": {role: {"price": float(price), "at": _iso(at)}
+                            for role, (at, price) in active.last_marks.items()} if active else {},
+        "economics": {"forecast": (ctx.get("decision") or {}).get("metrics") or {},
+                      "equivalent_full_size_hours": _exposure_hours(orders, ctx, as_utc(t.closed_at) or rt.clock.now()),
+                      "group": "shadow_research" if ctx.get("shadow") else "profit_gated"},
         "funding_cumulative": cum,
         "prices": {"long_entry": _avg_price(orders, "long", False), "short_entry": _avg_price(orders, "short", False),
                    "long_exit": _avg_price(orders, "long", True), "short_exit": _avg_price(orders, "short", True)},

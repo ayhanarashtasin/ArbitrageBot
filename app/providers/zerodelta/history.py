@@ -19,6 +19,7 @@ def analyze_series(
     primary_days: int,
     min_days: int,
     max_missing_intervals: int,
+    requested_end: datetime | None = None,
 ) -> tuple[HistoryCoverage, list[Point]]:
     """Validate one venue's series and return (coverage, points inside the trailing window).
 
@@ -47,16 +48,22 @@ def analyze_series(
             [],
         )
 
-    end = unique[-1][0]
+    end = requested_end or unique[-1][0]
     start = end - timedelta(days=primary_days)
-    window = [p for p in unique if p[0] >= start]
+    window = [p for p in unique if start <= p[0] <= end]
+    if not window:
+        return analyze_series([], primary_days=primary_days, min_days=min_days,
+                              max_missing_intervals=max_missing_intervals)
     first = window[0][0]
-    coverage_seconds = int((end - first).total_seconds())
+    last = window[-1][0]
+    coverage_seconds = int((last - first).total_seconds())
     missing = sum(
         max(0, round((b[0] - a[0]) / STEP) - 1) for a, b in zip(window, window[1:])
     )
 
     reasons: list[str] = []
+    if requested_end is not None and last != requested_end:
+        reasons.append("END_NOT_COVERED")
     if coverage_seconds < min_days * 86400:
         reasons.append("COVERAGE_BELOW_MIN")
     if missing > max_missing_intervals:
@@ -66,7 +73,7 @@ def analyze_series(
         requested_start=start,
         requested_end=end,
         first_timestamp=first,
-        last_timestamp=end,
+        last_timestamp=last,
         coverage_seconds=coverage_seconds,
         observation_count=len(window),
         expected_observation_count_if_known=coverage_seconds // 3600 + 1,

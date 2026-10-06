@@ -34,6 +34,7 @@ def test_net_edge_rejection_still_gets_a_labelled_shadow_trial_and_real_paper_fi
         notifier=r.notifier, provider=r.engine.provider)
     assert run(restored.recover()) == []
     assert restored.active["arb0001"].entry_done == 1
+    assert restored.active["arb0001"].median_net_funding_per_hour_7d == D("0.0003")
 
 
 def test_watch_enters_on_the_next_minute_without_another_sweep_and_stops_on_outage():
@@ -59,8 +60,9 @@ def test_spread_and_volatility_are_rechecked_for_the_second_slice():
     r.clock.advance(seconds=a.entry_plan.interval.total_seconds())
     r.src["S"].rate_per_hour = D(0)
     run(r.engine.run_once())
-    assert a.entry_done == 1 and a.gate_wait == "negative_spread_within_2h_funding"
+    assert a.entry_done == 1 and a.gate_wait == "net_funding_positive_now"
     r.src["S"].rate_per_hour = D("0.0003")
+    r.src["S"].mid = D("99.9")  # adverse spread exceeds 2 h current funding, but fits 8 h of the 7-day median
     for s in r.src.values():
         s.candle_closes = wild_closes()
     r.clock.advance(seconds=60)
@@ -71,6 +73,27 @@ def test_spread_and_volatility_are_rechecked_for_the_second_slice():
     r.clock.advance(seconds=60)
     run(r.engine.run_once())
     assert a.entry_done == 2 and a.gate_wait is None
+
+
+def test_a_gate_data_error_pauses_the_slice_and_logs_its_detail_once(caplog):
+    from app.exchanges.base import ExchangeRequestError
+    r = Rig()
+    r.scan()
+    run(r.engine.run_once())
+    a = r.engine.active["arb0001"]
+    r.clock.advance(seconds=a.entry_plan.interval.total_seconds())
+
+    async def refused(*args, **kwargs):
+        raise ExchangeRequestError("S: rate limit (retCode=10006) on /v5/market/kline; not retried")
+
+    r.src["S"].get_candles = refused
+    with caplog.at_level("INFO", logger="app.execution.engine"):
+        run(r.engine.run_once())
+        r.clock.advance(seconds=60)
+        run(r.engine.run_once())
+    assert a.entry_done == 1 and a.gate_wait == "gate_data_unavailable: ExchangeRequestError"
+    detail = [m for m in caplog.messages if "entry gate data unavailable" in m]
+    assert len(detail) == 1 and "retCode=10006" in detail[0]
 
 
 @pytest.mark.parametrize("price,action", [(120, RiskAction.CONTROLLED_EXIT), (123, RiskAction.EMERGENCY_EXIT)])

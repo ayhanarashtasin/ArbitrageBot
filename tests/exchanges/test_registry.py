@@ -104,3 +104,14 @@ def test_default_adapters_point_at_mainnet():
             assert adapter.base_url == host
         finally:
             close(adapter)
+
+
+def test_exclude_venues_names_a_venue_or_a_whole_exchange_and_refuses_typos():
+    from app.exchanges.registry import excluded_venues, is_excluded
+    assert excluded_venues(["BloFin USDT"]) == {"BloFin USDT"}
+    assert excluded_venues(["blofin"]) == {"BloFin USDT", "BloFin USDC"}  # the whole exchange
+    assert excluded_venues(["OKX", "gate"]) == {"OKX", "Gate"}
+    gone = excluded_venues(["BloFin"])
+    assert is_excluded("BLOFIN usdt", gone) and not is_excluded("Binance USDT", gone)
+    with pytest.raises(ValueError, match="bolfin"):
+        excluded_venues(["bolfin"])

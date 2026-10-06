@@ -1,6 +1,7 @@
 """Scanner: Zero Delta discovery -> direct verification -> engine, with every failure mode."""
 
 import asyncio
+import logging
 from datetime import timedelta
 from decimal import Decimal
 
@@ -10,6 +11,7 @@ from app.core.clock import ManualClock
 from app.core.config import ZeroDeltaSettings
 from app.core.health import Health
 from app.core.trading_config import TradingSettings
+from app.exchanges.base import ExchangeRequestError
 from app.execution.engine import TradeEngine
 from app.execution.venue_provider import PaperVenueProvider
 from app.notifications.notifier import Notifier
@@ -79,7 +81,7 @@ class FakeZD:
 
 
 class Rig:
-    def __init__(self, *, zd=None, closes=None, params_kw=None, sources=None, now=NOW):
+    def __init__(self, *, zd=None, closes=None, params_kw=None, sources=None, now=NOW, excluded=frozenset()):
         self.clock = ManualClock(now)
         self.repo = Repository("sqlite://", self.clock)
         kw = dict(target_notional_per_leg_usd=500, min_expected_net_edge_bps=1, vol_min_observations=200, sweep_delay_seconds=0,
@@ -99,7 +101,7 @@ class Rig:
         self.zd = zd if zd is not None else FakeZD(self.clock)
         self.scanner = Scanner(params=self.params, zd_settings=ZeroDeltaSettings(_env_file=None), zd=self.zd,
                                source_for_venue=self.src.get, repo=self.repo, engine=self.engine,
-                               notifier=self.notifier, clock=self.clock)
+                               notifier=self.notifier, clock=self.clock, excluded_venues=excluded)
 
     def scan(self, asset="BTC"):
         return run(self.scanner.scan_asset(asset))
@@ -220,6 +222,20 @@ def test_pairs_on_unsupported_venues_are_skipped_not_traded():
     assert rep.pairs_found == 1 and rep.executable_pairs == 0 and rep.opened == []
 
 
+def test_an_excluded_venue_is_never_traded_or_read():
+    r = Rig(excluded=frozenset({"S"}))
+    reads = []
+    original = r.src["S"].get_order_book
+
+    async def spy(*a, **kw):
+        reads.append(a)
+        return await original(*a, **kw)
+
+    r.src["S"].get_order_book = spy
+    rep = r.scan()
+    assert rep.pairs_found == 1 and rep.executable_pairs == 0 and rep.opened == [] and reads == []
+
+
 def test_kill_switch_and_limits_stop_new_entries():
     r = Rig()
     r.kill.pause("op", "maintenance")
@@ -277,3 +293,22 @@ def test_pairs_with_both_legs_on_one_exchange_are_skipped():
     r.src["S"] = shared  # the same adapter serves both venue names, like Binance USDT and Binance USDC
     rep = r.scan()
     assert rep.pairs_found == 1 and rep.executable_pairs == 0 and rep.opened == []
+
+
+@pytest.mark.parametrize("make_error,level", [
+    (lambda: RuntimeError("shadow trial capacity reached; waiting for an existing trial to close"), logging.INFO),
+    (lambda: ExchangeRequestError("connection reset"), logging.WARNING),
+])
+def test_a_deliberate_refusal_to_open_is_logged_as_info_and_a_real_failure_as_a_warning(caplog, make_error, level):
+    """The scanner repeated "could not open trade: shadow trial capacity reached" as a WARNING on every scan, which
+    drowned the console; a refusal that is the rules working is not a warning."""
+    r = Rig()
+
+    async def refuse(*args, **kwargs):
+        raise make_error()
+
+    r.engine.open_trade = refuse
+    with caplog.at_level(logging.INFO, logger="app.workers.scanner"):
+        r.scan()
+    records = [x for x in caplog.records if "could not open trade" in x.getMessage()]
+    assert records and all(x.levelno == level for x in records)

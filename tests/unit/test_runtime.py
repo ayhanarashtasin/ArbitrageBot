@@ -206,3 +206,16 @@ def test_home_page_shows_status_and_links():
     body_ = c.get("/").json()
     assert body_["run_mode"] == "paper" and body_["live_trading_enabled"] is False
     assert body_["links"]["state"] == "/state" and TOKEN not in c.get("/").text
+
+
+def test_a_live_runtime_reports_live_trading_as_enabled_instead_of_always_off():
+    """/, /health and the dashboard hard-coded live_trading_enabled=False, so a bot placing real orders said it was off."""
+    from app.exchanges.private.credentials import LiveCredentials
+    creds = LiveCredentials(_env_file=None, binance_api_key="bkey", binance_api_secret="bsecret-123",
+                            bybit_api_key="ykey", bybit_api_secret="ysecret-456")
+    rt = runtime(credentials=creds, **live_kw())
+    c = TestClient(create_app(rt, start_runner=False))
+    assert c.get("/health").json()["live_trading_enabled"] is True
+    assert c.get("/").json()["live_trading_enabled"] is True
+    assert c.get("/api/overview").json()["live_trading_enabled"] is True
+    asyncio.run(rt.aclose())

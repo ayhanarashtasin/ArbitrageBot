@@ -88,7 +88,7 @@ Build a production-oriented crypto funding-rate arbitrage bot that:
 - uses a **maximum child TWAP size of $100 notional per leg**;
 - never exceeds **4x leverage**;
 - enters only in sufficiently low-volatility conditions;
-- rejects adverse entry spreads that cost more than two hours of expected funding;
+- rejects adverse entry spreads that cost more than eight hours of the positive 7-day median funding edge;
 - continuously monitors actual filled exposure and account risk;
 - performs a **3-hour paired controlled exit** when either side's account equity reaches or falls below 30% of baseline;
 - performs an approximately **1-minute paired emergency exit** when either side's equity falls below 10% of baseline;
@@ -832,35 +832,21 @@ MAX(0, -entry_spread_pct)
 
 **LOCKED REQUIREMENT**
 
-Do not enter when the adverse entry spread costs more than two hours of expected net funding.
+Do not enter unless current venue funding is positive and the adverse entry spread costs no more than eight hours of the positive 7-day median net funding edge.
 
 ```text
 negative_entry_spread_cost
 <=
-expected_net_funding_over_2_hours
+expected_net_funding_over_8_hours_at_7d_median
 ```
-
-Otherwise:
 
 ```text
-REJECT
+current_net_funding_per_hour = short_funding_per_hour - long_funding_per_hour
+median_net_funding_per_hour_7d = median of the aligned 7-day hourly pair edges
+expected_net_funding_over_8_hours_at_7d_median = median_net_funding_per_hour_7d * 8
 ```
 
-Screening:
-
-```text
-net_funding_per_hour
-=
-short_funding_per_hour
--
-long_funding_per_hour
-
-expected_net_funding_2h
-=
-net_funding_per_hour * 2
-```
-
-If expected net funding over two hours is <= 0:
+Current funding and the 7-day median must both be positive; missing median history does not pass. Otherwise:
 
 ```text
 REJECT
@@ -953,14 +939,14 @@ MAX(
 Entry allowed only if:
 
 ```text
-low_vol_score <= 45
+low_vol_score <= 60
 ```
 
 ```env
-LOW_VOL_MAX_PERCENTILE=45
+LOW_VOL_MAX_PERCENTILE=60
 ```
 
-If >45:
+If >60:
 
 ```text
 WAIT
@@ -2152,20 +2138,22 @@ negative
 zero
 ```
 
-Two-hour spread rule:
+Eight-hour 7-day median spread rule:
 
 ```text
-spread < 2h funding -> pass
-spread = 2h funding -> pass
-spread > 2h funding -> reject
+current funding <= 0 -> reject
+7-day median funding <= 0 or unavailable -> reject
+spread < 8h of 7-day median funding -> pass
+spread = 8h of 7-day median funding -> pass
+spread > 8h of 7-day median funding -> reject
 ```
 
 Low-volatility:
 
 ```text
 max(20,40)=40 -> pass
-max(45,45)=45 -> pass
-max(20,46)=46 -> wait
+max(60,60)=60 -> pass
+max(20,61)=61 -> wait
 ```
 
 Leverage:
@@ -2287,7 +2275,7 @@ No live orders.
 
 ## Phase 4 — Deterministic validator
 
-Deliver provider/direct mismatch check, 2h spread rule, fees, slippage, liquidity, expected net edge and volatility filter.
+Deliver provider/direct mismatch check, 8h 7-day-median spread rule, fees, slippage, liquidity, expected net edge and volatility filter.
 
 No live orders.
 
@@ -2343,8 +2331,8 @@ ZERO_DELTA_REFRESH_INTERVAL_SECONDS=
 MAX_ALLOWED_LEVERAGE=4
 TWAP_ENTRY_DURATION_MINUTES=360
 TWAP_MAX_CHILD_NOTIONAL_USD=100
-LOW_VOL_MAX_PERCENTILE=45
-FUNDING_SCREENING_HORIZON_MINUTES=120
+LOW_VOL_MAX_PERCENTILE=60
+FUNDING_SCREENING_HORIZON_MINUTES=480
 CONTROLLED_EXIT_EQUITY_RATIO=0.30
 CONTROLLED_EXIT_DURATION_MINUTES=180
 EMERGENCY_EXIT_EQUITY_RATIO=0.10
@@ -2573,7 +2561,7 @@ Fees / Slippage / Liquidity / Net Edge Valid?
         │ LowVolScore =
         │ MAX(RV percentile, Basis-vol percentile)
         │
-        ├── >45 ────────► WAIT
+        ├── >60 ────────► WAIT
         ▼
 Position Sizing
         ▼
@@ -2673,3 +2661,41 @@ The user's follow-up expands paper research to stock contracts with an earnings 
 Historical hourly estimates disclose missing book/1-minute volatility data, ignored venue basis, assumed fees/slippage,
 and today's volume/venue-universe filter. They are distinct from actual forward paper fills, funding and risk management.
 The total position size and normal exit policy remain labelled paper parameters, not authoritative live decisions.
+
+---
+
+# 78. USER-REQUESTED POSTGRESQL DISCOVERY (2026-10-02)
+
+The user authorized implementing the database-first plan based on the Zero Delta owner's table access:
+
+- `marts.fct_coin_exchange_summary`: small hourly per-coin/per-venue screening feed.
+- `public.perp_market_data`: indexed, bounded history queries, under the owner's 15-second query limit.
+- `ZERO_DELTA_SOURCE=postgres` selects this transport behind the existing provider; `dash` remains the default until
+  the URL and database contract are configured. PostgreSQL discovery does not require website session credentials.
+- Never infer DATABASE units, timezones, funding kind, or access lifetime from the website's presentation. Explicitly
+  configure the verified volume/funding/interval/epoch units, funding kind and UTC interpretation. Unknown values stop
+  new discovery/admission. Raw observations preserve their source times; estimates are labelled and are not actual payments.
+- Fetch the summary at UTC :05 hourly, with bounded retries. Screen **pair APR differences**, reserve research capacity
+  for executable venues, then validate seven complete days of exact-market history. The bounded shortlist is disclosed;
+  its ranks are not presented as an exhaustive raw-history search. Open interest is informational, not a new filter.
+- Both legs must cover the same hourly analysis cutoff. Latest observations per UTC hour are retained without filling
+  gaps. Each rate is normalized using its own interval; the existing missing-hour default remains zero.
+- Compare provider funding against the timestamp-matched direct settlement or upcoming estimate period. Missing
+  reference evidence waits; disagreement blocks. Existing spread, volatility, fee, sizing, leverage and risk gates apply.
+- Keep the upstream connection separate from application persistence. Add an immutable local summary-batch table and
+  freeze selected evidence/parameters. Re-fetch original selected markets for week-later assessment even if delisted
+  from the current summary. Preserve trade observations and clearly labelled paper/shadow results.
+- Do not retrospectively rank last week's entire market using today's shortlisted universe. Database mode uses frozen
+  prospective picks; historical approximations retain their stated limitations.
+- Expose spike concentration and mean-without-largest as diagnostics. Do not introduce ranking weights or automatic
+  spike rejection thresholds without an explicit user-defined policy.
+- The supplied summary schema has no authoritative refresh marker. Disclose this limitation; selected raw-market
+  coverage establishes only those markets' freshness, not global summary refresh completion.
+- Upstream access/timeout failures block new admission, clear waiting selections and alert, while the independent
+  direct-venue engine continues managing existing positions and exits. No live mode is enabled by this migration.
+
+Read-only preflight on 2026-10-02 confirmed the supplied access, 7,118 summaries, raw fraction funding, UTC/millisecond
+timestamps and hour intervals on BTC Binance/Bybit/Hyperliquid. Raw samples arrive near HH:59 and are running estimates;
+the analysis cutoff is the preceding completed hour at the next :05. Original source timestamps control freshness.
+Null next-funding timestamps are resolved for comparison using actual direct-venue clocks/history, not guessed offsets.
+Binance/Hyperliquid had 337 points; Bybit's missing hour remained a strict rejection. No global refresh watermark exists.

@@ -26,6 +26,10 @@ class ZeroDeltaMarketSnapshot(_Model):
     provider_market_id: str | None = None  # Zero Delta exposes no separate market id
     timestamp: datetime | None = None  # provider timestamp; the venue table carries none
     received_at: datetime
+    source: str = "dash"
+    exchange_key: str | None = None
+    funding_kind: Literal["unknown", "settled", "predicted"] = "unknown"
+    next_funding_time: datetime | None = None
     asset: str
     venue_name: str
     venue_type: VenueType
@@ -56,6 +60,8 @@ class ZeroDeltaFundingObservation(_Model):
     price: Decimal | None = None
     basis: Decimal | None = None
     volume: Decimal | None = None
+    source_time: datetime | None = None
+    funding_kind: Literal["unknown", "settled", "predicted"] = "unknown"
 
 
 class HistoryCoverage(_Model):
@@ -98,6 +104,28 @@ class AssetAnalysis(_Model):
     markets: tuple[MarketEligibility, ...]
     histories: dict[str, tuple[ZeroDeltaFundingObservation, ...]]  # keyed by venue display name
     issues: tuple[ParseIssue, ...] = ()
+    source: str = "dash"
+    batch_id: str | None = None
+    analysis_end: datetime | None = None
+
+
+class SummaryMarket(_Model):
+    coin: str
+    exchange: str  # exact upstream key, retained for indexed queries
+    venue_name: str
+    avg_volume_usd: Decimal
+    avg_open_interest_usd: Decimal | None = None
+    avg_apr_7d: Decimal | None = None  # per VENUE, never the pair's edge
+    apr_windows: dict[str, Decimal | None] = {}
+
+
+class SummaryBatch(_Model):
+    id: str
+    as_of: datetime  # common hourly analysis boundary, not a claimed upstream refresh marker
+    fetched_at: datetime
+    markets: tuple[SummaryMarket, ...]
+    issues: tuple[ParseIssue, ...] = ()
+    refresh_verified: bool = False
 
 
 class AssetInfo(_Model):

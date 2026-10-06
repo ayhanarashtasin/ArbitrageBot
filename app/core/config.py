@@ -17,6 +17,23 @@ class ZeroDeltaSettings(BaseSettings):
     )
 
     enabled: bool = True
+    source: Literal["dash", "postgres"] = "dash"
+    database_url: SecretStr | None = None
+    db_query_timeout_seconds: float = Field(default=12, gt=0, lt=15)
+    db_connect_timeout_seconds: int = Field(default=5, ge=1, le=10)
+    db_concurrency: int = Field(default=2, ge=1, le=4)
+    research_pair_limit: int = Field(default=30, ge=2, le=200)
+    refresh_minute: int = Field(default=5, ge=0, le=59)
+    refresh_grace_minutes: int = Field(default=10, ge=0, le=30)
+    # These describe the DATABASE, not the Dash presentation. No inferred units.
+    db_volume_unit: Literal["usd", "millions"] | None = None
+    db_funding_unit: Literal["fraction", "percent"] | None = None
+    db_interval_unit: Literal["hours", "minutes", "seconds"] | None = None
+    db_timestamp_unit: Literal["seconds", "milliseconds"] | None = None
+    db_funding_kind: Literal["settled", "predicted"] | None = None
+    db_datetime_utc: bool | None = None
+    db_max_rows_per_market: int = Field(default=4000, ge=337, le=100000)
+    db_venue_names: dict[str, str] = Field(default_factory=dict)
     base_url: str = "https://www.zero-delta.xyz"
     dash_update_path: str = "/_dash-update-component"
     auth_mode: Literal["session_cookie"] = "session_cookie"
@@ -39,6 +56,11 @@ class ZeroDeltaSettings(BaseSettings):
 
     # Display-name -> CEX|DEX|HIP3, e.g. {"Arcus": "DEX"}. JSON in the environment.
     venue_types: dict[str, str] = Field(default_factory=dict)
+
+    def missing_database_contract(self) -> list[str]:
+        names = ("db_volume_unit", "db_funding_unit", "db_interval_unit", "db_timestamp_unit",
+                 "db_funding_kind", "db_datetime_utc")
+        return ["ZERO_DELTA_" + n.upper() for n in names if getattr(self, n) is None]
 
     @field_validator("min_avg_24h_volume_usd")
     @classmethod

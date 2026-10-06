@@ -161,3 +161,113 @@ def test_connections_are_kept_open_and_dead_connects_fail_fast():
         asyncio.run(short.aclose())
     finally:
         asyncio.run(p.aclose())
+
+
+def test_retry_diagnostics_name_the_failure_and_count_recovery_without_secrets(caplog):
+    import asyncio
+    import logging
+
+    async def scenario():
+        p = PublicHttp("test", "https://example.invalid", sleep=lambda _: asyncio.sleep(0),
+                       transport=httpx.MockTransport(sequence(httpx.ConnectTimeout("secret-value"), {"ok": True})))
+        try:
+            assert await p.get_json("/public") == {"ok": True}
+            stats = p.diagnostics()
+            assert stats["requests"] == 1 and stats["attempts"] == 2 and stats["retries"] == 1
+            assert stats["recovered_requests"] == 1 and stats["errors"] == {"ConnectTimeout": 1}
+            assert stats["http_statuses"] == {"200": 1}
+        finally:
+            await p.aclose()
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(scenario())
+    assert "ConnectTimeout" in caplog.text and "recovered on attempt 2/3" in caplog.text
+    assert "secret-value" not in caplog.text
+
+
+def test_closed_candles_share_reads_and_expire_at_the_next_minute():
+    import asyncio
+    from datetime import timedelta
+    from app.core.clock import ManualClock
+    from tests.execution.fakes import FakeSource
+    from tests.unit.helpers import T0
+
+    async def scenario():
+        clock = ManualClock(T0)
+        source = FakeSource("test", clock=clock)
+        source.candle_closes = [100] * 5
+        adapter = BinanceUsdmAdapter(now=clock.now)
+        calls = []
+
+        async def candles(*args):
+            calls.append(clock.now())
+            await asyncio.sleep(0)
+            return await source.get_candles(*args)
+
+        adapter.get_candles = candles
+        try:
+            a, b = await asyncio.gather(adapter.get_closed_candles("BTCUSDT", limit=5),
+                                        adapter.get_closed_candles("BTCUSDT", limit=5))
+            assert a == b and len(calls) == 1
+            a.clear()
+            assert len(await adapter.get_closed_candles("BTCUSDT", limit=5)) == 5
+            clock.advance(seconds=60)
+            latest = await adapter.get_closed_candles("BTCUSDT", limit=5)
+            assert len(calls) == 2 and latest[-1].open_time == clock.now() - timedelta(minutes=1)
+        finally:
+            await adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_failed_candle_read_is_not_cached():
+    import asyncio
+    from tests.unit.helpers import T0
+
+    async def scenario():
+        adapter = BinanceUsdmAdapter(now=lambda: T0)
+        calls = []
+        async def candles(*args):
+            calls.append(1)
+            raise ExchangeRequestError("temporary candle outage")
+        adapter.get_candles = candles
+        try:
+            for _ in range(2):
+                with pytest.raises(ExchangeRequestError):
+                    await adapter.get_closed_candles("BTCUSDT")
+            assert len(calls) == 2
+        finally:
+            await adapter.close()
+    asyncio.run(scenario())
+
+
+def test_cancelling_one_candle_consumer_keeps_the_shared_read_and_cleans_up():
+    import asyncio
+    from app.core.clock import ManualClock
+    from tests.execution.fakes import FakeSource
+    from tests.unit.helpers import T0
+
+    async def scenario():
+        clock = ManualClock(T0)
+        source = FakeSource("test", clock=clock)
+        source.candle_closes = [100] * 5
+        adapter = BinanceUsdmAdapter(now=clock.now)
+        started, release = asyncio.Event(), asyncio.Event()
+        async def candles(*args):
+            started.set()
+            await release.wait()
+            return await source.get_candles(*args)
+        adapter.get_candles = candles
+        try:
+            abandoned = asyncio.create_task(adapter.get_closed_candles("BTCUSDT", limit=5))
+            await started.wait()
+            survivor = asyncio.create_task(adapter.get_closed_candles("BTCUSDT", limit=5))
+            abandoned.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await abandoned
+            release.set()
+            assert len(await survivor) == 5
+            assert adapter._candle_reads == {}
+        finally:
+            await adapter.close()
+    asyncio.run(scenario())

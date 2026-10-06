@@ -25,7 +25,7 @@ from app.execution.pair_executor import Leg, PairExecutor, SliceResult, SliceToo
 from app.execution.live import LiveVenue
 from app.execution.paper import PaperVenue
 from app.execution.twap import TwapPlan, make_exit_plan, make_lot_entry_plan
-from app.execution.venue_provider import VenueProvider
+from app.execution.venue_provider import UnsupportedVenue, VenueProvider
 from app.market_data.volatility import candles_needed, entry_allowed, low_vol_score
 from app.market_data.earnings import CRYPTO, EarningsCalendar, asset_class
 from app.notifications.notifier import Notifier
@@ -55,6 +55,7 @@ class Observation:
     reachable: dict[str, bool] = field(default_factory=lambda: {"long": True, "short": True})
     funding: dict[str, FundingInfo | None] = field(default_factory=lambda: {"long": None, "short": None})
     marks: dict[str, Decimal] = field(default_factory=dict)  # mid price per leg, for mark-to-market P&L
+    errors: dict[str, str] = field(default_factory=dict)
 
     @property
     def net_funding_per_hour(self) -> Decimal | None:
@@ -103,6 +104,7 @@ class ActiveTrade:
     stale_since: datetime | None = None  # start of the current stale-data episode (slices are paused meanwhile)
     stale_alerted: bool = False
     funding_polled: dict[str, datetime] = field(default_factory=dict)  # live legs: when funding was last read
+    median_net_funding_per_hour_7d: Decimal | None = None
 
     @property
     def legs(self) -> tuple[Leg, Leg]:
@@ -123,6 +125,12 @@ LAST_KNOWN_PRICE_MAX_AGE = timedelta(minutes=5)
 STALE_ALERT_AFTER = timedelta(seconds=30)
 # Live legs: funding is read from the venue's own account records (venues post a settlement within minutes).
 LIVE_FUNDING_POLL = timedelta(minutes=10)
+# Restart recovery. A venue that does not answer while a trade is rebuilt is retried after these pauses (3 attempts),
+# then again every RECOVERY_RETRY_EVERY; the trade is not sent to MANUAL_INTERVENTION_REQUIRED for a dropped connection.
+RECOVERY_RETRY_PAUSES = (1.0, 3.0)
+RECOVERY_RETRY_EVERY = timedelta(seconds=30)
+# What recovering one trade came to.
+_RECOVERED, _PENDING, _MANUAL, _UNMANAGED, _SKIPPED = "recovered", "pending", "manual", "unmanaged", "skipped"
 
 
 class TradeEngine:
@@ -137,6 +145,9 @@ class TradeEngine:
         # In-memory reason that stops NEW trades without a database flag (live readiness: fewer than two venues ready).
         # Open trades are always managed and exited regardless.
         self.entry_block: str | None = None
+        # Trades that could not be rebuilt after a restart (trade id -> last error); retried by run_once().
+        self.recovery_pending: dict[str, str] = {}
+        self._recovery_retry_at: datetime | None = None
 
     # ==== admission ==============================================================================
     def blocked(self) -> str | None:
@@ -215,6 +226,7 @@ class TradeEngine:
                                 events=lambda kind, data, tid=trade_id: self.repo.audit(kind, data, tid))
         active = ActiveTrade(trade_id, pair.asset, executor, now, plan, EdgeDecayMonitor(p), long_eq, short_eq,
                              asset_class=decision_context.get("asset_class"),
+                             median_net_funding_per_hour_7d=pair.stats.median / 100 if pair.stats else None,
                              state=S.ENTERING)
         self.active[trade_id] = active
         self.repo.acquire_lease(trade_id, self.owner)
@@ -233,12 +245,17 @@ class TradeEngine:
     async def _observe_leg(self, active: ActiveTrade, leg: Leg, obs: Observation) -> tuple[Decimal | None, Decimal | None]:
         role = leg.role
         try:
-            acct = await leg.venue.get_account_equity()
-            pos = await leg.venue.get_position(leg.meta.symbol)
-            book = await self._fresh_book(leg)
-            fund = await leg.venue.get_funding_info(leg.meta.symbol)
-        except ExchangeError:
+            if isinstance(leg.venue, PaperVenue):
+                book, fund = await asyncio.gather(self._fresh_book(leg), leg.venue.get_funding_info(leg.meta.symbol))
+                acct, pos = await leg.venue.get_account_snapshot(leg.meta.symbol, book)
+            else:
+                acct = await leg.venue.get_account_equity()
+                pos = await leg.venue.get_position(leg.meta.symbol)
+                book = await self._fresh_book(leg)
+                fund = await leg.venue.get_funding_info(leg.meta.symbol)
+        except ExchangeError as exc:
             obs.reachable[role] = False
+            obs.errors[role] = f"{type(exc).__name__}: {exc}"[:200]
             return None, None
         mark = (book.best_bid + book.best_ask) / 2 if book.best_bid and book.best_ask else None
         if mark is not None:
@@ -538,8 +555,8 @@ class TradeEngine:
     async def _slice_gates(self, active: ActiveTrade, obs: Observation, planned_usd: Decimal) -> str | None:
         """The task spec's opening rules, re-checked before EVERY entry slice. None = go, else why it waits.
 
-        1. 2 h spread rule on this slice's executable prices and the venues' current funding (LOCKED).
-        2. Low-vol score on 1-minute candles of both legs <= 45 (LOCKED).
+        1. Spread rule: current funding must be positive; the 7-day median can cover up to 8 h of spread (LOCKED).
+        2. Low-vol score on 1-minute candles of both legs <= 50 (LOCKED).
         """
         p = self.params
         need = candles_needed(p)
@@ -550,8 +567,8 @@ class TradeEngine:
                 cls = active.asset_class
             if await self.earnings.blackout(active.asset, cls):
                 return "earnings_blackout"
-        lc, sc = await asyncio.gather(long_leg.venue.get_candles(long_leg.meta.symbol, "1m", need),
-                                      short_leg.venue.get_candles(short_leg.meta.symbol, "1m", need))
+        lc, sc = await asyncio.gather(long_leg.venue.get_closed_candles(long_leg.meta.symbol, "1m", need),
+                                      short_leg.venue.get_closed_candles(short_leg.meta.symbol, "1m", need))
         vol = low_vol_score(lc, sc, rv_window=p.rv_window_minutes, basis_window=p.basis_vol_window_minutes,
                             min_observations=p.vol_min_observations)
         if not entry_allowed(vol, p.low_vol_max_percentile):
@@ -577,9 +594,15 @@ class TradeEngine:
         if any(v.slippage_bps is not None and v.slippage_bps > p.max_allowed_slippage_bps for v in (lv, sv)):
             return "slippage_too_high"
         _, neg_cost = entry_spread(lv.vwap, sv.vwap)
-        ok, _ = spread_rule(neg_cost, sf.rate_per_hour, lf.rate_per_hour, D(p.funding_screening_horizon_minutes) / 60)
+        current_net = sf.rate_per_hour - lf.rate_per_hour
+        median_net = active.median_net_funding_per_hour_7d
+        if current_net <= 0:
+            return "net_funding_positive_now"
+        if median_net is None or median_net <= 0:
+            return "median_funding_positive"
+        ok, _ = spread_rule(neg_cost, current_net, median_net, D(p.funding_screening_horizon_minutes) / 60)
         if not ok:
-            return "negative_spread_within_2h_funding"
+            return "negative_spread_within_8h_median_funding"
         return None
 
     def _entry_overdue(self, active: ActiveTrade, now: datetime) -> str | None:
@@ -611,7 +634,9 @@ class TradeEngine:
             try:
                 wait = await self._slice_gates(active, obs, planned)
             except (ExchangeError, ValueError) as exc:  # the slice waits; the trade never goes to ERROR over data
-                wait = f"gate_data_unavailable: {type(exc).__name__}"
+                wait = f"gate_data_unavailable: {type(exc).__name__}"  # short: a repeat must compare equal
+                if active.gate_wait != wait:  # the detail once per wait, so the log shows which venue and why
+                    log.info("trade %s slice %s: entry gate data unavailable: %s", active.id, idx, exc)
             if wait is not None:
                 if active.gate_wait != wait:
                     self.repo.audit("entry_slice_waiting", {"slice": idx, "reason": wait}, active.id)
@@ -835,7 +860,10 @@ class TradeEngine:
             active.resume_state = state
             self._set(active, S.DEGRADED, ",".join(decision.reasons))
             self.repo.merge_context(active.id, resume_state=state.value)
-            await self.notifier.alert("venue_disconnect", f"degraded: {', '.join(decision.reasons)}",
+            errors = active.last_obs.errors if active.last_obs else {}
+            detail = "; ".join(f"{role}: {error}" for role, error in errors.items())
+            await self.notifier.alert("venue_disconnect", f"degraded: {', '.join(decision.reasons)}"
+                                      + (f" | {detail}" if detail else ""),
                                       severity="critical", trade_id=active.id)
 
     async def _resume_from_degraded(self, active: ActiveTrade, state: TradeState) -> None:
@@ -872,67 +900,177 @@ class TradeEngine:
 
     # ==== recovery (section 55) ==================================================================
     async def recover(self) -> list[str]:
-        """Rebuild unfinished trades after a restart. Returns ids that need a human."""
-        manual: list[str] = []
+        """Rebuild unfinished trades after a restart. Returns ids that need a human.
+
+        A trade resumes only once the venues prove it consistent (section 55). A venue that merely cannot be read right
+        now is not an inconsistency: the trade is rebuilt a little later, or runs DEGRADED and reconciles every cycle,
+        like any outage in mid-run. A human is needed when a trade cannot be rebuilt at all (no adapter or credentials,
+        an unexpected error), when it was already left in MANUAL_INTERVENTION_REQUIRED, or when it is a live trade and
+        the bot is not running live, so nothing manages its real positions.
+        """
+        needs_human: list[str] = []
+        blocking: list[str] = []
         for row in self.repo.unfinished_trades():
-            state = TradeState(row.state)
-            if state not in EXPOSED:
-                self.repo.set_state(row.id, S.REJECTED, "process restarted before any order was sent")
-                continue
-            if state is S.MANUAL_INTERVENTION_REQUIRED:
-                manual.append(row.id)
-                continue
-            try:
-                legs = await self.provider.rebuild(row, self.params)
-                plan_ctx = (row.context or {}).get("entry_plan", {})
-                p = self.params
-                heals = sum(1 for o in self.repo.orders_for(row.id) if "-h" in o.client_order_id)
-                executor = PairExecutor(row.id, legs[0], legs[1], self.clock, p,
-                                        events=lambda kind, data, tid=row.id: self.repo.audit(kind, data, tid),
-                                        heal_seq_start=heals + 1000)  # skip past ids used before the crash
-                child = D(str(plan_ctx.get("child", p.twap_max_child_notional_usd)))
-                slices = int(plan_ctx.get("slices", 1))
-                interval = timedelta(seconds=float(plan_ctx.get("interval_s", 60)))
-                slice_qty = tuple(D(q) for q in plan_ctx.get("slice_qty") or ()) or None
-                plan = TwapPlan(child * slices, child, slices, interval, as_utc(row.opened_at), slice_qty)
-                active = ActiveTrade(row.id, row.asset, executor, as_utc(row.opened_at), plan, EdgeDecayMonitor(p),
-                                     row.baseline_long_equity, row.baseline_short_equity, state=state,
-                                     max_delta_usd=row.max_delta_imbalance_usd)
-                active.entry_delay = timedelta(seconds=float((row.context or {}).get("entry_delay_s", 0)))
-                active.asset_class = (row.context or {}).get("asset_class")
-                self._load_ledgers(active)
-                # entry progress = slices whose orders exist; exit progress restarts safely (reduce-only)
-                done = self.repo.slices(row.id, "entry")
-                active.entry_done = len(done)
-                active.synced = {o.client_order_id for o in self.repo.orders_for(row.id)}
-                ctx_exit = (row.context or {}).get("exit")
-                if state in (S.CONTROLLED_EXIT, S.EMERGENCY_EXIT, S.EXITING, S.EXIT_PENDING) and ctx_exit:
-                    active.exit_mode, active.exit_reason = ctx_exit["mode"], ctx_exit["reason"]
-                    active.exit_generation = int(ctx_exit.get("generation", 1))
-                    now = datetime.fromisoformat(ctx_exit["start"]) if ctx_exit.get("start") else self.clock.now()
-                    n = int(ctx_exit["slices"])
-                    active.exit_plan = TwapPlan(D(str(ctx_exit["child"])) * n, D(str(ctx_exit["child"])), n,
-                                                timedelta(seconds=float(ctx_exit.get("interval_s",
-                                                    2 if active.exit_mode == "emergency" else 60))), now,
-                                                end_at=datetime.fromisoformat(ctx_exit["end_at"]) if ctx_exit.get("end_at") else None)
-                    active.exit_done = int((row.context or {}).get("exit_progress", len(self.repo.slices(row.id, "exit"))))
-                if state in (S.DEGRADED, S.RECONCILING, S.ERROR):
-                    rs = (row.context or {}).get("resume_state")
-                    active.resume_state = TradeState(rs) if rs else S.HEDGED_OPEN
-                self.active[row.id] = active
-                # venue truth beats the database: adopt it, then require a consistent, safe position
-                if not await self.reconcile(active):
-                    raise ExchangeError("venue state cannot be read")
+            outcome = await self._recover_trade(row)
+            if outcome == _MANUAL:
+                needs_human.append(row.id)
+                blocking.append(row.id)
+            elif outcome == _UNMANAGED:
+                needs_human.append(row.id)
+        if blocking:
+            self.repo.set_kv("block_new_trades", {"reason": f"manual intervention needed for {', '.join(blocking)}"})
+        return needs_human
+
+    async def _recover_trade(self, row) -> str:
+        state = TradeState(row.state)
+        if state not in EXPOSED:
+            self.repo.set_state(row.id, S.REJECTED, "process restarted before any order was sent")
+            return _SKIPPED
+        if row.run_mode != self.params.run_mode:
+            return await self._other_mode_trade(row)
+        if state is S.MANUAL_INTERVENTION_REQUIRED:
+            return _MANUAL
+        return await self._rebuild_trade(row, state)
+
+    async def _other_mode_trade(self, row) -> str:
+        """A trade opened in another run mode is never rebuilt with this mode's legs.
+
+        A live trade rebuilt with simulated legs would "close" at $0 while its real positions stay open; a paper trial
+        rebuilt as live would reach for real venues it never touched.
+        """
+        mode = self.params.run_mode
+        if row.run_mode == "paper":  # it exists only in the simulation: untouched, it resumes in paper mode
+            await self.notifier.alert(
+                "recovery", f"paper trade {row.id} ({row.state}) left untouched: the bot runs in {mode} mode; it "
+                            "resumes when the bot runs in paper mode", trade_id=row.id)
+            return _SKIPPED
+        await self.notifier.alert(
+            "manual_intervention_required",
+            f"{row.run_mode} trade {row.id} ({row.long_venue} / {row.short_venue}, {row.state}) may hold REAL "
+            f"positions, but the bot runs in {mode} mode: nothing is managing or closing them. Start the bot in "
+            f"{row.run_mode} mode, or close them by hand", severity="critical", trade_id=row.id)
+        return _UNMANAGED
+
+    async def _rebuild_trade(self, row, state: TradeState, *, startup: bool = True) -> str:
+        try:
+            legs = await self._rebuild_legs(row, retry=startup)
+            active = self._restore_active(row, state, legs)
+            self.active[row.id] = active
+            self.recovery_pending.pop(row.id, None)
+            # venue truth beats the database: adopt it, then require a consistent, safe position
+            if await self.reconcile(active):
                 await self.notifier.alert("recovery", f"trade {row.id} restored in {state.value}", trade_id=row.id)
-            except Exception as exc:  # noqa: BLE001
-                self.active.pop(row.id, None)
-                self._set_manual(row.id, f"recovery failed: {type(exc).__name__}: {exc}")
-                manual.append(row.id)
-                await self.notifier.alert("manual_intervention_required", "recovery could not establish state",
-                                          severity="critical", trade_id=row.id)
-        if manual:
-            self.repo.set_kv("block_new_trades", {"reason": f"manual intervention needed for {', '.join(manual)}"})
-        return manual
+            else:
+                await self._recover_degraded(active, state)
+            return _RECOVERED
+        except UnsupportedVenue as exc:  # no adapter or no credentials: waiting will not help
+            return await self._recovery_failed(row, exc)
+        except ExchangeError as exc:  # a venue did not answer: not an inconsistency, try again soon
+            if row.id not in self.recovery_pending:
+                await self.notifier.alert(
+                    "venue_disconnect", f"trade {row.id} could not be rebuilt after the restart "
+                                        f"({type(exc).__name__}: {exc}); retrying every "
+                                        f"{RECOVERY_RETRY_EVERY.total_seconds():.0f} s. It is not managed until then",
+                    severity="critical", trade_id=row.id)
+            self.recovery_pending[row.id] = f"{type(exc).__name__}: {exc}"[:200]
+            return _PENDING
+        except Exception as exc:  # noqa: BLE001 - an unexpected error is a bug: a human must look
+            return await self._recovery_failed(row, exc)
+
+    async def _rebuild_legs(self, row, *, retry: bool) -> tuple[Leg, Leg]:
+        """provider.rebuild, tried a few times when a venue does not answer, so one dropped connection at the moment of
+        a restart cannot strand a trade. A missing adapter or credential is permanent and raised at once."""
+        for pause in ((*RECOVERY_RETRY_PAUSES, None) if retry else (None,)):
+            try:
+                return await self.provider.rebuild(row, self.params)
+            except UnsupportedVenue:
+                raise
+            except ExchangeError:
+                if pause is None:
+                    raise
+                await self.clock.sleep(pause)
+        raise AssertionError("unreachable")
+
+    async def _recovery_failed(self, row, exc: BaseException) -> str:
+        log.error("trade %s: recovery failed", row.id, exc_info=exc)
+        self.active.pop(row.id, None)
+        self.recovery_pending.pop(row.id, None)
+        self._set_manual(row.id, f"recovery failed: {type(exc).__name__}: {exc}")
+        await self.notifier.alert("manual_intervention_required",
+                                  f"recovery could not establish state: {type(exc).__name__}: {exc}"[:300],
+                                  severity="critical", trade_id=row.id)
+        return _MANUAL
+
+    async def _recover_degraded(self, active: ActiveTrade, state: TradeState) -> None:
+        """Rebuilt, but a venue could not be read: run DEGRADED. That state sends no orders, reconciles every cycle and
+        resumes only when the venues and the database agree (section 55's "resume only if consistent")."""
+        if state not in (S.DEGRADED, S.RECONCILING, S.ERROR):
+            active.resume_state = state
+            self._set(active, S.DEGRADED, "restart: venue state could not be read yet")
+            self.repo.merge_context(active.id, resume_state=state.value)
+        await self.notifier.alert(
+            "venue_disconnect", f"trade {active.id} restored in {state.value}, but a venue could not be read: no orders "
+                                "until it reconciles (retried every cycle)", severity="critical", trade_id=active.id)
+
+    async def _retry_pending_recovery(self) -> None:
+        """Trades that could not be rebuilt at start-up are tried again every RECOVERY_RETRY_EVERY."""
+        now = self.clock.now()
+        if not self.recovery_pending or (self._recovery_retry_at is not None and now < self._recovery_retry_at):
+            return
+        self._recovery_retry_at = now + RECOVERY_RETRY_EVERY
+        blocking: list[str] = []
+        for trade_id in list(self.recovery_pending):
+            try:
+                row = self.repo.get_trade(trade_id)
+                if await self._rebuild_trade(row, TradeState(row.state), startup=False) == _MANUAL:
+                    blocking.append(trade_id)
+            except Exception:  # noqa: BLE001 - a trade that is not rebuilt yet must never fail the engine cycle
+                log.exception("retrying the recovery of trade %s failed", trade_id)
+        if blocking:
+            self.repo.set_kv("block_new_trades", {"reason": f"manual intervention needed for {', '.join(blocking)}"})
+
+    def _restore_active(self, row, state: TradeState, legs: tuple[Leg, Leg]) -> ActiveTrade:
+        """The in-memory trade, rebuilt from its database record (no venue is called here)."""
+        plan_ctx = (row.context or {}).get("entry_plan", {})
+        p = self.params
+        heals = sum(1 for o in self.repo.orders_for(row.id) if "-h" in o.client_order_id)
+        executor = PairExecutor(row.id, legs[0], legs[1], self.clock, p,
+                                events=lambda kind, data, tid=row.id: self.repo.audit(kind, data, tid),
+                                heal_seq_start=heals + 1000)  # skip past ids used before the crash
+        child = D(str(plan_ctx.get("child", p.twap_max_child_notional_usd)))
+        slices = int(plan_ctx.get("slices", 1))
+        interval = timedelta(seconds=float(plan_ctx.get("interval_s", 60)))
+        slice_qty = tuple(D(q) for q in plan_ctx.get("slice_qty") or ()) or None
+        plan = TwapPlan(child * slices, child, slices, interval, as_utc(row.opened_at), slice_qty)
+        zd_stats = ((row.context or {}).get("zero_delta") or {}).get("stats") or {}
+        median_edge_pct = zd_stats.get("median")
+        active = ActiveTrade(row.id, row.asset, executor, as_utc(row.opened_at), plan, EdgeDecayMonitor(p),
+                             row.baseline_long_equity, row.baseline_short_equity, state=state,
+                             median_net_funding_per_hour_7d=(D(str(median_edge_pct)) / 100
+                                                             if median_edge_pct is not None else None),
+                             max_delta_usd=row.max_delta_imbalance_usd)
+        active.entry_delay = timedelta(seconds=float((row.context or {}).get("entry_delay_s", 0)))
+        active.asset_class = (row.context or {}).get("asset_class")
+        self._load_ledgers(active)
+        # entry progress = slices whose orders exist; exit progress restarts safely (reduce-only)
+        done = self.repo.slices(row.id, "entry")
+        active.entry_done = len(done)
+        active.synced = {o.client_order_id for o in self.repo.orders_for(row.id)}
+        ctx_exit = (row.context or {}).get("exit")
+        if state in (S.CONTROLLED_EXIT, S.EMERGENCY_EXIT, S.EXITING, S.EXIT_PENDING) and ctx_exit:
+            active.exit_mode, active.exit_reason = ctx_exit["mode"], ctx_exit["reason"]
+            active.exit_generation = int(ctx_exit.get("generation", 1))
+            now = datetime.fromisoformat(ctx_exit["start"]) if ctx_exit.get("start") else self.clock.now()
+            n = int(ctx_exit["slices"])
+            active.exit_plan = TwapPlan(D(str(ctx_exit["child"])) * n, D(str(ctx_exit["child"])), n,
+                                        timedelta(seconds=float(ctx_exit.get("interval_s",
+                                            2 if active.exit_mode == "emergency" else 60))), now,
+                                        end_at=datetime.fromisoformat(ctx_exit["end_at"]) if ctx_exit.get("end_at") else None)
+            active.exit_done = int((row.context or {}).get("exit_progress", len(self.repo.slices(row.id, "exit"))))
+        if state in (S.DEGRADED, S.RECONCILING, S.ERROR):
+            rs = (row.context or {}).get("resume_state")
+            active.resume_state = TradeState(rs) if rs else S.HEDGED_OPEN
+        return active
 
     def _load_ledgers(self, active: ActiveTrade) -> None:
         from app.persistence.models import Fill
@@ -966,6 +1104,7 @@ class TradeEngine:
         accounts and executor, step() never raises, and the venue adapters underneath are httpx clients that are safe
         to share between concurrent requests.
         """
+        await self._retry_pending_recovery()
         items = list(self.active.items())
         results = await asyncio.gather(*(self.step(t) for _, t in items))
         return {tid: result for (tid, _), result in zip(items, results)}

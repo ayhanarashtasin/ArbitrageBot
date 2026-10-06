@@ -25,7 +25,7 @@ def venue_key(name: str) -> str:
 _CEX = [
     "Binance USDC", "Binance USDT", "Bitstamp", "BloFin USDC", "BloFin USDT",
     "Bybit USDC", "Bybit USDT", "Coinbase International", "Coinbase US", "Deribit",
-    "Gate", "Kraken", "MEXC USDC", "MEXC USDT", "OKX", "OKX xPerps",
+    "Gate", "Kraken", "MEXC USDC", "MEXC USDT", "OKX", "OKX xPerps", "Bitget",
 ]
 _DEX = ["Aster", "dYdX", "Extended", "GRVT", "Hyperliquid", "Lighter", "Paradex"]
 # Added after web research on 2026-09-29 (sources in the research notes). Still provisional.
@@ -40,6 +40,16 @@ DEFAULT_VENUE_TYPES: dict[str, VenueType] = {
     **{venue_key(n): VenueType.DEX for n in _DEX},
     **{venue_key(n): VenueType.HIP3 for n in _HIP3},
 }
+
+
+def database_venue_name(exchange: str, overrides: dict[str, str] | None = None) -> str:
+    """Use existing display identities; unfamiliar keys remain unsupported, never guessed."""
+    if overrides and exchange in overrides:
+        return overrides[exchange]
+    aliases = {"coinbase_intl": "Coinbase International", "trade_xyz": "Trade.xyz",
+               "lighter_rh": "Ligher on RH", "ondoperps": "Ondo Perps", "bitget_usdt": "Bitget"}
+    names = {venue_key(n): n for n in [*_CEX, *_DEX, *_HIP3]}
+    return aliases.get(exchange, names.get(venue_key(exchange), exchange))
 
 
 class VenueRegistry:

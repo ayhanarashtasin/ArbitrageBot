@@ -85,3 +85,27 @@ def get_adapter(zd_venue_name: str, **adapter_kwargs) -> ExchangeAdapter | None:
     """
     binding = binding_for(zd_venue_name)
     return binding.factory(**adapter_kwargs) if binding else None
+
+
+def excluded_venues(entries: list[str]) -> frozenset[str]:
+    """The supported venues that EXCLUDE_VENUES names, as Zero Delta display names.
+
+    An entry is a venue ("BloFin USDT") or a whole exchange ("BloFin" = BloFin USDT and BloFin USDC), matched without
+    regard to case or punctuation. An entry that names no supported venue raises ValueError, so a typo cannot leave
+    the venue in use without anyone noticing.
+    """
+    out: set[str] = set()
+    for entry in entries:
+        key = _key(entry)
+        exact = [name for name in ADAPTER_FOR_ZERODELTA_VENUE if _key(name) == key]
+        matched = exact or [name for name in ADAPTER_FOR_ZERODELTA_VENUE if key and _key(name).startswith(key)]
+        if not matched:
+            raise ValueError(f"EXCLUDE_VENUES: {entry!r} is not a supported venue; use one of "
+                             f"{', '.join(ADAPTER_FOR_ZERODELTA_VENUE)} (or an exchange name such as BloFin)")
+        out.update(matched)
+    return frozenset(out)
+
+
+def is_excluded(zd_venue_name: str, excluded: frozenset[str]) -> bool:
+    """True when the Zero Delta venue is one of `excluded` (case/punctuation-insensitive)."""
+    return _key(zd_venue_name) in {_key(name) for name in excluded}
